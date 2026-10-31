@@ -62,7 +62,7 @@ compatibility with every real Aseprite document.
 
 These are workflow captures from this implementation: a blank 2 × 2 document before opening
 anything, then the imported synthetic fixture at the same zoom. The first is not a render of
-an older PhotoCraft version. The second shows the four expected colors and the editable
+an older PhotoCraft version. The second shows the expected pixel colors and the editable
 Group / Top / Base tree. Captured offscreen with the CPU canvas at 6400% zoom.
 
 ![Blank document before opening the fixture](images/aseprite/before-open.png)
