@@ -143,8 +143,10 @@ pub(crate) fn process_tree(
 /// Save As offers for a raw. An input whose file name has no extension (a dot in a folder name
 /// doesn't count) is saved as PNG.
 pub(super) fn same_format(path: &str) -> String {
-    const IMPORT_ONLY: &[&str] =
-        &["pdn", "kra", "krz", "af", "afdesign", "afphoto", "afpub", "heic", "heif", "hif", "svg", "svgz", "cin", "pcx", "xpm", "xcf", "xcfgz", "gz", "psdt"];
+    const IMPORT_ONLY: &[&str] = &[
+        "pdn", "kra", "krz", "aseprite", "ase", "af", "afdesign", "afphoto", "afpub", "heic", "heif", "hif", "svg", "svgz", "cin", "pcx", "xpm", "xcf",
+        "xcfgz", "gz", "psdt",
+    ];
     let ext = extension(path).unwrap_or_else(|| "png".into());
     let no_writer = photocraft_codecs::from_extension(&ext).is_some_and(|f| !f.caps().write);
     if photocraft_io::raw::EXTENSIONS.contains(&ext.as_str()) || IMPORT_ONLY.contains(&ext.as_str()) || no_writer { "psd".into() } else { ext }
@@ -160,7 +162,17 @@ fn same_format_takes_the_file_names_extension() {
     assert_eq!(same_format("/in/logo.svg"), "psd");
     assert_eq!(same_format("/in/scan.cin"), "psd");
     // Formats PhotoCraft opens and does not write are saved as PSD.
-    for name in ["/in/scan.dcm", "/in/scan.DICOM", "/in/scan.dc3", "/in/page.xcf", "/in/page.xcf.gz", "/in/page.xcfgz", "/in/card.psdt"] {
+    for name in [
+        "/in/scan.dcm",
+        "/in/scan.DICOM",
+        "/in/scan.dc3",
+        "/in/page.xcf",
+        "/in/page.xcf.gz",
+        "/in/page.xcfgz",
+        "/in/card.psdt",
+        "/in/sprite.aseprite",
+        "/in/SPRITE.ASE",
+    ] {
         assert_eq!(same_format(name), "psd", "{name}");
     }
     for f in photocraft_codecs::Format::ALL.into_iter().filter(|f| f.caps().read && !f.caps().write) {

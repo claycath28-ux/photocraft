@@ -15,6 +15,7 @@
 //!   layer; unsupported raw variants fall back to the embedded JPEG preview.
 //! * Layered TIFFs (Photoshop layer data in tags 37724 and 34377) open with their
 //!   layers through the PSD path and are written back the same way; see `tiff_layers`.
+//! * Single-frame Aseprite RGBA/grayscale documents open as editable layers and groups (import only).
 //! * Paint.NET PDN3 documents open as editable bitmap layers (import only).
 //! * OpenRaster (`.ora`) documents open and save with their layers, groups, blend modes,
 //!   opacity and visibility; see `ora`.
@@ -38,6 +39,7 @@ pub mod abr_map;
 mod adjust_map;
 pub mod affinity;
 pub mod annotations_map;
+pub mod aseprite;
 pub mod asl_map;
 pub mod blocks;
 pub mod camera_raw_xmp;
@@ -95,6 +97,9 @@ pub use psd_import::{psd_to_document, psd_to_document_with};
 /// Errors from import/export.
 #[derive(Debug, thiserror::Error)]
 pub enum IoError {
+    /// Aseprite document decode failure.
+    #[error("Aseprite: {0}")]
+    Aseprite(String),
     /// Paint.NET document decode failure.
     #[error("PDN: {0}")]
     Pdn(String),
@@ -467,6 +472,9 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt, o
     // preview_never_saves_back_to_its_native_or_renamed_source).
     if is_psd(bytes) {
         return import_psd(name, ctl, damaged, |want, recover| PsdFile::from_bytes_and_merged_recovering(bytes, want, recover));
+    }
+    if aseprite::is_aseprite(bytes) || (has_extension(name, "aseprite") && photocraft_codecs::detect(bytes).is_none()) {
+        return aseprite::import(name, bytes, ctl);
     }
     if affinity::is_affinity(bytes) || affinity::has_extension(name) {
         return affinity::import(name, bytes);
