@@ -4,6 +4,13 @@ use photocraft_format::list_recovery;
 use photocraft_ui_egui::{PhotocraftApp, prefs_ui};
 use serde_json::{Value, json};
 
+#[test]
+fn aseprite_is_available_in_all_formats_and_its_own_open_filter() {
+    assert!(OPEN_EXTS.contains(&"aseprite") && OPEN_EXTS.contains(&"ase"));
+    assert!(OPEN_FILTERS.iter().any(|(name, exts)| *name == "Aseprite" && exts.contains(&"aseprite")));
+    assert!(!SAVE_FILTERS.iter().any(|(_, exts)| exts.contains(&"aseprite")));
+}
+
 /// #6601: a chosen path whose name isn't valid Unicode is reported, never handed on lossily
 /// (Open would fail with "No such file", Save would write a second, renamed file).
 #[test]

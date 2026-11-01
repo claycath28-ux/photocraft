@@ -948,6 +948,58 @@ fn video_memory_counts_originals_and_deduplicates_displayed_frames() {
 }
 
 #[test]
+fn sprite_memory_counts_off_playhead_tiles_indices_and_metadata_shared_with_history() {
+    use photocraft_doc::sprite::{MetadataTarget, Sprite, SpriteCel, SpriteChunk, SpriteFrame, SpriteLayer};
+    let mut doc = Document::new("Sprite", Size::new(2, 2), ColorMode::Indexed, SampleType::U8);
+    let mut layer = Layer::raster("Ink", photocraft_doc::PixelFormat::RGBA8);
+    let mut pixels = photocraft_doc::Surface::new(photocraft_doc::PixelFormat::RGBA8);
+    pixels.write_pixel(0, 0, &[1.0, 0.0, 0.0, 1.0]);
+    let mut indices = photocraft_doc::Surface::new(photocraft_doc::PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false));
+    indices.write_pixel(0, 0, &[1.0 / 255.0]);
+    layer.content = photocraft_doc::LayerContent::Raster(pixels.clone());
+    let id = layer.id;
+    doc.layers.push(layer);
+    let cel = Arc::new(SpriteCel {
+        rect: photocraft_doc::Rect::from_xywh(0, 0, 1, 1),
+        pixels,
+        indices: Some(indices),
+        opacity: 255,
+        z_index: 0,
+        linked_frame: None,
+        precise: None,
+    });
+    let frame = Arc::new(SpriteFrame {
+        duration_ms: 17,
+        palette: Arc::new(vec![]),
+        cels: [(id, cel)].into(),
+        metadata: vec![SpriteChunk { kind: 0x2020, target: MetadataTarget::Sprite, bytes: Arc::new(vec![0; 400]) }],
+    });
+    doc.sprite = Some(Sprite {
+        frames: vec![frame.clone(), frame],
+        current: 0,
+        layers: vec![SpriteLayer { id, flags: 3, opacity: 255, uuid: None }],
+        indexed: true,
+        transparent_index: 0,
+        pixel_aspect: [1, 1],
+        grid: [0; 4],
+        tags: vec![],
+        profile: None,
+    });
+    let mut cur = Arc::new(doc);
+    let mut h = History { max_bytes: usize::MAX, ..History::default() };
+    assert_eq!(h.pixel_bytes(&cur), 256 * 256 * 5 + 400, "display/cels/frame aliases count once");
+    edit(&mut h, &mut cur, "Remove animation", |doc| doc.sprite = None);
+    assert_eq!(h.pixel_bytes(&cur), 256 * 256 * 5 + 400, "undo still owns indices and metadata");
+    edit(&mut h, &mut cur, "Rename", |doc| doc.name = "Static".into());
+    h.max_bytes = 10 * 256 * 256;
+    h.trim(&cur);
+    assert_counter(&h, &cur);
+    h.max_bytes = 1;
+    h.trim(&cur);
+    assert_eq!(h.pixel_bytes(&cur), 256 * 256 * 4, "trim frees the off-playhead state");
+}
+
+#[test]
 fn video_memory_budget_evicts_deleted_off_playhead_frames() {
     for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
         let mut cur = Arc::new(video_document(depth, 6));

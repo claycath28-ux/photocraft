@@ -917,6 +917,19 @@ impl PcraftWriter {
         self.hash_cache.retain(|_, (w, _)| w.strong_count() > 0);
         self.blob_hash_cache.retain(|_, (w, _)| w.strong_count() > 0);
         convert::check_nesting(&doc.layers)?;
+        // A live/background edit can change the current display layer before the engine
+        // captures it. Native save must retain that edit in the authoritative cel too.
+        let captured = if doc.sprite.is_some() {
+            let mut copy = doc.clone();
+            copy.capture_sprite_frame().map_err(FormatError::corrupt)?;
+            Some(copy)
+        } else {
+            None
+        };
+        let doc = captured.as_ref().unwrap_or(doc);
+        if let Some(sprite) = &doc.sprite {
+            sprite.validate().map_err(FormatError::corrupt)?;
+        }
         let mut c = Collect { hash_cache: Some(&mut self.hash_cache), blob_hash_cache: Some(&mut self.blob_hash_cache), ..Default::default() };
         let document = convert::doc_m(doc, &mut c);
         let manifest = Manifest {

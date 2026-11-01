@@ -136,6 +136,7 @@ pub mod smart_cmds;
 pub mod smart_svg_cmds;
 pub mod smartselect_cmds;
 pub mod solid_fill_cmds;
+pub mod sprite_cmds;
 pub mod stamp_cmds;
 pub mod style_asl_cmds;
 pub mod swatch_cmds;
@@ -1355,6 +1356,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::migrate_cmds::specs());
     v.extend(crate::trap_cmds::specs());
     v.extend(crate::timeline_cmds::specs());
+    v.extend(sprite_cmds::specs());
     v.extend(crate::video_cmds::specs());
     v.extend(crate::jobs::specs());
     v.extend(crate::wia_cmds::specs());

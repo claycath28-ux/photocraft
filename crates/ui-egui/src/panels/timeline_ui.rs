@@ -18,6 +18,11 @@ pub struct TimelineUi {
     /// egui time (seconds) of the last auto-advance.
     #[serde(default, skip)]
     pub last_time: f64,
+    /// Selected Aseprite tag (None plays the entire sprite).
+    #[serde(default)]
+    pub sprite_tag: Option<usize>,
+    #[serde(skip)]
+    pub sprite_start: f64,
 }
 
 /// Menu checkmark for Window › Timeline.
@@ -45,6 +50,14 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
         return;
     }
     let tl = app.session.active().and_then(|d| d.doc.timeline.clone());
+    let sprite = app.session.active().and_then(|d| d.doc.sprite.as_ref());
+    let sprite_duration = sprite.map(|s| s.frame_duration_ms());
+    let sprite_time = sprite.map(|s| s.frames.iter().take(s.current).map(|f| u64::from(f.duration_ms)).sum::<u64>() as f64 / 1000.0);
+    let sprite_tags = sprite.map(|s| s.tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let mut sprite_tag = app.ui.timeline.sprite_tag;
+    if sprite_tag.is_some_and(|i| i >= sprite_tags.len()) {
+        sprite_tag = None;
+    }
     let have_doc = app.session.active().is_some();
     let mut act: Option<(&str, Value)> = None;
     let mut close = false;
@@ -108,16 +121,41 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
                         act = Some(("timeline.nextFrame", json!({})));
                     }
                     ui.separator();
-                    ui.label(RichText::new(format!("{:.2}s", tl.time())).color(t.text_dim).monospace());
+                    ui.label(RichText::new(format!("{:.3}s", sprite_time.unwrap_or(f64::from(tl.time())))).color(t.text_dim).monospace());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::icons::button(ui, "trash", 20.0, false, tl!("Delete Timeline")).clicked() {
+                        if sprite_duration.is_none() && crate::icons::button(ui, "trash", 20.0, false, tl!("Delete Timeline")).clicked() {
                             stop_play = true;
                             act = Some(("timeline.delete", json!({})));
                         }
-                        ui.label(RichText::new(format!("{:.0} fps", tl.fps)).color(t.text_dim));
+                        if let Some(ms) = sprite_duration {
+                            let mut delay = u32::from(ms);
+                            if ui.add(egui::DragValue::new(&mut delay).range(0..=65535).suffix(" ms")).changed() {
+                                act = Some(("sprite.setDuration", json!({"durationMs":delay})));
+                            }
+                        } else {
+                            ui.label(RichText::new(format!("{:.0} fps", tl.fps)).color(t.text_dim));
+                        }
                     });
                 });
                 ui.add_space(6.0);
+                if sprite_duration.is_some() && !sprite_tags.is_empty() {
+                    let mut selected = sprite_tag;
+                    if selected.is_some_and(|i| i >= sprite_tags.len()) {
+                        selected = None;
+                    }
+                    craft_ui::ComboBox::from_id_salt("sprite-animation-tag")
+                        .selected_text(selected.and_then(|i| sprite_tags.get(i)).cloned().unwrap_or_else(|| tl!("All").to_owned()))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut selected, None, tl!("All"));
+                            for (i, name) in sprite_tags.iter().enumerate() {
+                                ui.selectable_value(&mut selected, Some(i), name);
+                            }
+                        });
+                    if selected != sprite_tag {
+                        sprite_tag = selected;
+                        stop_play = true;
+                    }
+                }
                 // Scrubber: frame playhead across the duration.
                 if tl.duration > 1 {
                     let mut frame = tl.current as f64;
@@ -131,6 +169,7 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
     });
 
+    app.ui.timeline.sprite_tag = sprite_tag;
     if close {
         app.ui.timeline.open = false;
         app.ui.timeline.playing = false;
@@ -140,17 +179,50 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
     } else if toggle_play {
         app.ui.timeline.playing = !app.ui.timeline.playing;
         app.ui.timeline.last_time = ctx.input(|i| i.time);
+        app.ui.timeline.sprite_start = app.ui.timeline.last_time - sprite_time.unwrap_or(0.0);
+        if let Some(tag) = app.ui.timeline.sprite_tag
+            && let Some(start) = app.session.active().and_then(|d| d.doc.sprite.as_ref()).and_then(|s| s.playback_frame(0, Some(tag)).ok()).map(|v| v.0)
+        {
+            let _ = app.run("timeline.setFrame", json!({"frame":start}));
+            app.ui.timeline.sprite_start = app.ui.timeline.last_time;
+        }
     }
     if let Some((cmd, p)) = act {
         let _ = app.run(cmd, p);
     }
     // Playback: auto-advance the playhead at the frame rate (loops).
     if app.ui.timeline.playing {
+        if app.session.active().is_some_and(|d| d.doc.sprite.is_some()) {
+            let elapsed = ((ctx.input(|i| i.time) - app.ui.timeline.sprite_start).max(0.0) * 1000.0) as u64;
+            if let Ok(result) = app.run("sprite.playback", json!({"elapsedMs":elapsed,"tag":app.ui.timeline.sprite_tag})) {
+                if let Some(frame) = result.get("frame").and_then(Value::as_u64)
+                    && app.session.active().and_then(|d| d.doc.timeline.as_ref()).is_some_and(|t| t.current != frame as usize)
+                {
+                    let _ = app.run("timeline.setFrame", json!({"frame":frame}));
+                }
+                if result.get("finished").and_then(Value::as_bool) == Some(true) {
+                    app.ui.timeline.playing = false;
+                }
+            } else {
+                app.ui.timeline.playing = false;
+            }
+            ctx.request_repaint();
+            return;
+        }
         if let Some(t) = app.session.active().and_then(|d| d.doc.timeline.clone()) {
             let now = ctx.input(|i| i.time);
-            let period = 1.0 / f64::from(t.fps.max(1.0));
+            let period = app
+                .session
+                .active()
+                .and_then(|d| d.doc.sprite.as_ref())
+                .map_or_else(|| 1.0 / f64::from(t.fps.max(1.0)), |s| f64::from(s.frame_duration_ms().max(1)) / 1000.0);
             if now - app.ui.timeline.last_time >= period {
-                app.ui.timeline.last_time = now;
+                app.ui.timeline.last_time += period;
+                // A sleeping/hidden window resumes from now instead of spending minutes
+                // catching up. Normal fractional periods accumulate without clock drift.
+                if now - app.ui.timeline.last_time > 1.0 {
+                    app.ui.timeline.last_time = now;
+                }
                 let next = (t.current + 1) % t.duration.max(1);
                 let _ = app.run("timeline.setFrame", json!({ "frame": next as u64 }));
             }
@@ -165,6 +237,28 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn aseprite_timeline_uses_millisecond_delays_and_stops_at_a_finite_tag_end() {
+        let doc = photocraft_io::import("animation.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.add_document(doc, None);
+        app.ui.timeline.open = true;
+        app.ui.timeline.playing = true;
+        app.ui.timeline.sprite_start = 0.0;
+        let ctx = egui::Context::default();
+        for (seconds, expected) in [(0.0, 0), (0.016, 0), (0.018, 1), (0.099, 1), (0.101, 2), (0.130, 0)] {
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(seconds), ..Default::default() }, |ui| windows(&mut app, ui.ctx()));
+            output.textures_delta.clear();
+            assert_eq!(app.session.active().unwrap().doc.timeline.as_ref().unwrap().current, expected);
+        }
+        app.ui.timeline.sprite_tag = Some(0);
+        let mut output = ctx.run_ui(egui::RawInput { time: Some(0.201), ..Default::default() }, |ui| windows(&mut app, ui.ctx()));
+        output.textures_delta.clear();
+        assert!(!app.ui.timeline.playing, "two ping-pong traversals have completed");
+        assert_eq!(app.session.active().unwrap().doc.timeline.as_ref().unwrap().current, 0);
+        assert_eq!(app.session.active().unwrap().history.past_len(), 0, "playback adds no history");
+    }
 
     #[test]
     fn stop_step_and_scrub_pause_playback_and_second_stop_rewinds() {
