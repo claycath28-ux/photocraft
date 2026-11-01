@@ -319,3 +319,26 @@ fn turns_refuse_retained_slice_coordinates_before_pixels_or_history_change() {
     assert_eq!(ordinary.active().unwrap().history.past_len(), 1);
     ordinary.execute("edit.undo", json!({})).unwrap();
 }
+
+#[test]
+fn crops_with_retained_slices_cannot_move_the_canvas_origin_even_at_the_same_size() {
+    use photocraft_doc::sprite::{MetadataTarget, SpriteChunk};
+    let mut s = session();
+    s.edit("Slice", |doc, _| {
+        Arc::make_mut(&mut doc.sprite.as_mut().unwrap().frames[0]).metadata.push(SpriteChunk {
+            kind: 0x2022,
+            target: MetadataTarget::Frame,
+            bytes: Arc::new(vec![]),
+        });
+        Ok(())
+    })
+    .unwrap();
+    for (x, y) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        assert_refused_unchanged(&mut s, "image.crop", json!({"x":x,"y":y,"width":2,"height":1}));
+    }
+    assert_refused_unchanged(&mut s, "image.crop", json!({"x":0,"y":0,"width":2,"height":1,"angle":180}));
+    let mut ordinary = session();
+    ordinary.execute("image.crop", json!({"x":1,"y":0,"width":2,"height":1})).unwrap();
+    assert_eq!(ordinary.active().unwrap().history.past_len(), 1);
+    ordinary.execute("edit.undo", json!({})).unwrap();
+}
