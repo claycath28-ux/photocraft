@@ -268,4 +268,24 @@ mod aseprite_tests {
         assert!(batch_out.join("sprite.aseprite").is_file());
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn aseprite_convert_keeps_all_frames_durations_and_indexed_cels() {
+        let dir = std::env::temp_dir().join(format!("photocraft-aseprite-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("animation.aseprite");
+        let target = dir.join("animation.pcraft");
+        std::fs::write(&source, include_bytes!("../../../crates/io/tests/fixtures/aseprite/animation.aseprite")).unwrap();
+        let r = invoke(&["convert", source.to_str().unwrap(), target.to_str().unwrap()]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        let doc = photocraft_format::load_path(&target).unwrap();
+        let sprite = doc.sprite.as_ref().unwrap();
+        assert_eq!(sprite.frames.len(), 3);
+        assert_eq!(sprite.frames.iter().map(|f| f.duration_ms).collect::<Vec<_>>(), [17, 83, 29]);
+        let cel = sprite.frames[0].cels.values().next().unwrap();
+        assert_eq!(cel.indices.as_ref().unwrap().to_interleaved(cel.rect), [1, 2, 3, 0]);
+        assert_eq!(sprite.frames[1].cels.values().next().unwrap().linked_frame, Some(0));
+        assert!(sprite.frames[2].cels.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

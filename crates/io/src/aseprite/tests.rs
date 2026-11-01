@@ -744,3 +744,72 @@ fn rgb_and_grayscale_backgrounds_keep_their_background_traits_on_export_and_resa
         }
     }
 }
+
+fn rgb_or_gray_background(fmt: PixelFormat) -> photocraft_doc::Document {
+    let mut doc = photocraft_doc::Document::new("Background", photocraft_geom::Size::new(2, 1), fmt.mode, SampleType::U8);
+    let mut layer = photocraft_doc::Layer::raster("Background", fmt);
+    layer.locks.position = true;
+    layer.locks.transparency = true;
+    layer.surface_mut().unwrap().fill_rect(doc.bounds(), &[1.0; 4]);
+    doc.layers.push(layer);
+    let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+    read(&out.bytes).unwrap().document
+}
+
+#[test]
+fn transparency_in_any_background_frame_is_refused_without_changing_the_source() {
+    for fmt in [PixelFormat::RGBA8, PixelFormat::new(ColorMode::Grayscale, SampleType::U8, true)] {
+        for frame_index in [0, 1] {
+            for alpha in [0.0, 0.5] {
+                let mut doc = rgb_or_gray_background(fmt);
+                let id = doc.layers[0].id;
+                let sprite = doc.sprite.as_mut().unwrap();
+                sprite.frames.push(sprite.frames[0].clone());
+                let cel = Arc::make_mut(Arc::make_mut(&mut sprite.frames[frame_index]).cels.get_mut(&id).unwrap());
+                let mut samples = vec![1.0; fmt.channels()];
+                *samples.last_mut().unwrap() = alpha;
+                cel.pixels.write_pixel(0, 0, &samples);
+                if frame_index == 0 {
+                    doc.layers[0].surface_mut().unwrap().write_pixel(0, 0, &samples);
+                }
+                let before = doc.clone();
+                let error = crate::export(&doc, "aseprite", &Default::default()).unwrap_err().to_string();
+                assert!(error.contains("Background layers must be opaque in every frame"), "{error}");
+                assert_eq!(doc, before);
+            }
+        }
+    }
+}
+
+#[test]
+fn background_opacity_checks_sparse_defaults_without_rejecting_foreground_transparency() {
+    let mut doc = rgb_or_gray_background(PixelFormat::RGBA8);
+    let mut upper = photocraft_doc::Layer::raster("Transparent foreground", PixelFormat::RGBA8);
+    upper.surface_mut().unwrap().write_pixel(0, 0, &[1.0, 0.0, 0.0, 0.5]);
+    doc.layers.push(upper);
+    let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+    let back = read(&out.bytes).unwrap().document;
+    assert!(back.background().is_some());
+    assert_eq!(back.layers[1].surface().unwrap().to_interleaved(back.bounds()), doc.layers[1].surface().unwrap().to_interleaved(doc.bounds()));
+    let id = doc.layers[0].id;
+    let sprite = doc.sprite.as_mut().unwrap();
+    let mut next = sprite.frames[0].as_ref().clone();
+    let mut cel = next.cels[&id].as_ref().clone();
+    cel.rect = Rect::from_xywh(0, 0, 257, 1);
+    cel.pixels = Surface::new(PixelFormat::RGBA8);
+    cel.pixels.fill_rect(Rect::from_xywh(0, 0, 256, 1), &[1.0; 4]);
+    next.cels.insert(id, Arc::new(cel));
+    sprite.frames.push(Arc::new(next));
+    assert!(crate::export(&doc, "aseprite", &Default::default()).unwrap_err().to_string().contains("Background layers must be opaque"));
+}
+
+#[test]
+fn a_retained_transparency_lock_on_a_non_background_layer_is_not_cleared() {
+    let mut doc = rgb_or_gray_background(PixelFormat::RGBA8);
+    doc.layers.insert(0, photocraft_doc::Layer::raster("Ordinary bottom layer", PixelFormat::RGBA8));
+    assert!(doc.background().is_none());
+    let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+    let back = read(&out.bytes).unwrap().document;
+    assert!(!back.layers[0].locks.transparency);
+    assert!(back.layers[1].locks.transparency);
+}

@@ -260,20 +260,21 @@ mod cancellation_tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    fn record(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for n in [0u32, 2, 4] {
+            out.extend(n.to_le_bytes());
+        }
+        out.extend(1u16.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend([0; 18]); // base index/reserved and empty name
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(data);
+        out
+    }
+
     #[test]
     fn tileset_budget_is_checked_before_inflation_and_accepts_the_exact_remaining_size() {
-        fn record(data: &[u8]) -> Vec<u8> {
-            let mut out = Vec::new();
-            for n in [0u32, 2, 4] {
-                out.extend(n.to_le_bytes());
-            }
-            out.extend(1u16.to_le_bytes());
-            out.extend(1u16.to_le_bytes());
-            out.extend([0; 18]); // base index/reserved and empty name
-            out.extend((data.len() as u32).to_le_bytes());
-            out.extend(data);
-            out
-        }
         let checks = AtomicUsize::new(0);
         let cancel = || {
             checks.fetch_add(1, Ordering::Relaxed);
@@ -320,5 +321,49 @@ mod cancellation_tests {
         let mut trailing = compressed;
         trailing.push(0);
         assert!(inflate(&trailing, raw.len(), &Interrupt::NONE).is_err());
+    }
+
+    #[test]
+    fn render_tilemaps_rejects_combined_tileset_overflow_before_inflating_the_second() {
+        use photocraft_doc::sprite::SpriteFrame;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Default::default());
+        encoder.write_all(&[7; 16]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let run = |budget: usize, second: &[u8]| {
+            let chunk = |bytes: Vec<u8>| SpriteChunk { kind: 0x2023, target: MetadataTarget::Sprite, bytes: Arc::new(bytes) };
+            let empty = || SpriteFrame { duration_ms: 0, palette: Arc::new(Vec::new()), cels: Default::default(), metadata: Vec::new() };
+            let mut frame = empty();
+            let mut second = record(second);
+            second[..4].copy_from_slice(&1u32.to_le_bytes());
+            frame.metadata = vec![chunk(record(&compressed)), chunk(second)];
+            let ctl = Interrupt::NONE;
+            let mut decoder = Decoder {
+                nodes: Vec::new(),
+                parents: Vec::new(),
+                layers: Vec::new(),
+                frames: vec![Arc::new(frame)],
+                frame: empty(),
+                target: MetadataTarget::Sprite,
+                fmt: PixelFormat::RGBA8,
+                indexed: false,
+                transparent: 0,
+                flags: 0,
+                budget,
+                metadata_bytes: 0,
+                chunks: 0,
+                profile: None,
+                profile_chunk: None,
+                profile_seen: false,
+                palette_seen: false,
+                tags: Vec::new(),
+                warnings: Default::default(),
+                ctl: &ctl,
+            };
+            decoder.render_tilemaps().map(|()| decoder.budget)
+        };
+        let error = run(31, b"not zlib").unwrap_err().to_string();
+        assert!(error.contains("remaining decoded memory budget"), "{error}");
+        assert_eq!(run(32, &compressed).unwrap(), 0, "two distinct tilesets fit the exact combined budget");
+        assert!(run(32, b"not zlib").unwrap_err().to_string().contains("invalid tile data"));
     }
 }

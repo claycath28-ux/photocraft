@@ -98,8 +98,11 @@ untagged. Palette names/alpha, tags/repeats, sprite/layer/cel/tag user data (inc
 properties), slices/pivots/nine-patch data, external references and legacy mask/path records are
 retained in bounded native blobs and re-emitted with their object associations. External files
 are never followed. Explicit layer/cel deletion removes metadata owned by the deleted object.
-Canvas size changes, crops that move the canvas origin, flips and rotations are refused while retained slice coordinates are
-present, since PhotoCraft cannot yet transform those keys with the pixels.
+Canvas size changes, crops that move or resample the canvas, flips and rotations (including
+Arbitrary) are refused while retained slice coordinates are present, since PhotoCraft cannot
+yet transform those keys with the pixels. Background layers must be opaque in every frame;
+export refuses transparent Background cels instead of discarding their alpha. Converting an
+RGB or grayscale Background to an ordinary layer keeps it ordinary after export.
 
 ## Limits and evidence
 

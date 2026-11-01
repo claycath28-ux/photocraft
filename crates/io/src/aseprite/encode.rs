@@ -86,7 +86,7 @@ pub(super) fn export(doc: &Document, ctl: &Interrupt<'_>) -> Result<ExportResult
         append_metadata(&mut chunks, &frame.metadata, &MetadataTarget::Frame)?;
         if frame_index == 0 {
             for (layer, level) in &layers {
-                chunks.push(layer_chunk(layer, *level, sprite, flags, copy.is_background(layer.id))?);
+                chunks.push(layer_chunk(layer, *level, sprite, flags, copy.is_background(layer.id), ctl)?);
                 append_metadata(&mut chunks, &frame.metadata, &MetadataTarget::Layer(layer.id))?;
             }
         }
@@ -212,6 +212,46 @@ fn require_opaque(pixels: &photocraft_raster::Surface, rect: Rect) -> Result<()>
     Ok(())
 }
 
+// Background is a layer-wide flag. Check each frame's used pixels once per shared tile
+// region, excluding transparent padding outside the cel rectangle.
+fn require_opaque_background(sprite: &Sprite, id: LayerId, ctl: &Interrupt<'_>) -> Result<()> {
+    let mut checked = std::collections::HashSet::new();
+    for frame in &sprite.frames {
+        ctl.check().map_err(|_| IoError::Cancelled)?;
+        let Some(cel) = frame.cels.get(&id) else { continue };
+        let pixels = &cel.pixels;
+        let bpp = pixels.format().bytes_per_pixel();
+        let mut occupied = 0u64;
+        for (coord, tile) in pixels.tiles() {
+            let tile_rect = coord.rect();
+            let used = cel.rect.intersect(&tile_rect);
+            if used.is_empty() {
+                continue;
+            }
+            occupied += 1;
+            let bounds = [used.x0 - tile_rect.x0, used.y0 - tile_rect.y0, used.x1 - tile_rect.x0, used.y1 - tile_rect.y0];
+            if !checked.insert((Arc::as_ptr(tile) as usize, bpp, bounds)) {
+                continue;
+            }
+            ctl.check().map_err(|_| IoError::Cancelled)?;
+            for y in bounds[1]..bounds[3] {
+                let start = (y as usize * 256 + bounds[0] as usize) * bpp;
+                let end = (y as usize * 256 + bounds[2] as usize) * bpp;
+                let row = tile.bytes().get(start..end).ok_or_else(|| invalid("invalid Background tile length"))?;
+                if row.chunks_exact(bpp).any(|p| p.last().copied() != Some(255)) {
+                    return Err(invalid(
+                        "Aseprite Background layers must be opaque in every frame; convert the Background to an ordinary layer before exporting",
+                    ));
+                }
+            }
+        }
+        if occupied < cel.rect.tile_count() && pixels.default_pixel().last().copied() != Some(1.0) {
+            return Err(invalid("Aseprite Background layers must be opaque in every frame; convert the Background to an ordinary layer before exporting"));
+        }
+    }
+    Ok(())
+}
+
 fn reserve_transparent_index(palette: &mut Vec<sprite::PaletteEntry>, layers: &[SpriteLayer], cels: &BTreeMap<LayerId, Arc<SpriteCel>>) -> Result<u8> {
     // Aseprite reserves the header index on every non-Background layer, even if the
     // source has no transparency. Reserve an unused entry so opaque index zero stays ink.
@@ -260,11 +300,19 @@ fn layers<'a>(doc: &'a Document, sprite: &Sprite) -> Result<Vec<(&'a Layer, usiz
     Ok(out)
 }
 
-fn layer_chunk(layer: &Layer, level: usize, sprite: &Sprite, flags: u32, background: bool) -> Result<Vec<u8>> {
+fn layer_chunk(layer: &Layer, level: usize, sprite: &Sprite, flags: u32, background: bool, ctl: &Interrupt<'_>) -> Result<Vec<u8>> {
     let source = sprite.layers.iter().find(|l| l.id == layer.id);
-    let mut bits = source.map_or(0, |s| s.flags) & (8 | 16 | 64);
-    if background && !sprite.indexed && sprite.tilemap_descriptor(layer.id).is_none() {
-        bits |= 8;
+    let retained = source.map_or(0, |s| s.flags) & (8 | 16 | 64);
+    let mut bits = retained;
+    if !sprite.indexed && sprite.tilemap_descriptor(layer.id).is_none() {
+        // Layer From Background clears the lock; its retained file flag must not restore it.
+        bits &= !8;
+        if background || retained & 8 != 0 && layer.locks.transparency {
+            bits |= 8;
+        }
+    }
+    if bits & 8 != 0 {
+        require_opaque_background(sprite, layer.id, ctl)?;
     }
     if layer.visible {
         bits |= 1
