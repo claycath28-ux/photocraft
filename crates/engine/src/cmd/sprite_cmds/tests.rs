@@ -7,6 +7,12 @@ use photocraft_doc::{
 use photocraft_geom::{Rect, Size};
 use photocraft_raster::Surface;
 
+fn add_to_session(doc: Document) -> Session {
+    let mut s = Session::new();
+    s.add_document(doc, None);
+    s
+}
+
 fn session() -> Session {
     let mut doc = Document::new("Animation", Size::new(2, 1), ColorMode::Rgb, SampleType::U8);
     let mut surface = Surface::new(PixelFormat::RGBA8);
@@ -32,9 +38,162 @@ fn session() -> Session {
         profile: None,
     });
     doc.timeline = Some(photocraft_doc::Timeline::new(2, 10.0));
-    let mut s = Session::new();
-    s.add_document(doc, None);
-    s
+    add_to_session(doc)
+}
+
+fn in_group(mut doc: Document, all: bool, position: bool) -> Document {
+    let children = std::mem::take(&mut doc.layers);
+    let mut group = Layer::group("Parent", children);
+    group.locks.all = all;
+    group.locks.position = position;
+    doc.sprite.as_mut().unwrap().layers.insert(0, SpriteLayer { id: group.id, flags: 3, opacity: 255, uuid: None });
+    doc.layers.push(group);
+    doc
+}
+
+fn assert_refused_unchanged(s: &mut Session, command: &str, params: Value) {
+    let state = s.active().unwrap();
+    let before = state.doc.clone();
+    let (history, revision, active) = (state.history.past_len(), state.revision, state.active_layer);
+    assert!(s.execute(command, params).is_err(), "{command}");
+    let state = s.active().unwrap();
+    assert_eq!(state.doc, before, "{command}: document");
+    assert_eq!(state.history.past_len(), history, "{command}: history");
+    assert_eq!(state.revision, revision, "{command}: revision");
+    assert_eq!(state.active_layer, active, "{command}: target");
+}
+
+#[test]
+fn sprite_commands_are_disabled_without_a_sprite_or_with_unsupported_samples() {
+    let mut empty = Session::new();
+    let mut ordinary = add_to_session(Document::new("Ordinary", Size::new(2, 1), ColorMode::Rgb, SampleType::U8));
+    for spec in specs() {
+        for s in [&mut empty, &mut ordinary] {
+            assert!(s.disabled_reason(spec.id).is_some(), "{}", spec.id);
+            assert!(s.execute(spec.id, json!({})).is_err(), "{}", spec.id);
+        }
+    }
+    assert_eq!(ordinary.active().unwrap().history.past_len(), 0);
+    for depth in [SampleType::U16, SampleType::F32] {
+        let mut s = session();
+        Arc::make_mut(&mut s.active_mut().unwrap().doc).depth = depth;
+        for spec in specs() {
+            assert!(s.disabled_reason(spec.id).unwrap().contains("8-bit"), "{}", spec.id);
+            assert_refused_unchanged(&mut s, spec.id, json!({}));
+        }
+    }
+}
+
+#[test]
+fn every_sprite_edit_adds_one_history_step_and_roundtrips_undo_redo() {
+    for command in [
+        "sprite.setDuration",
+        "sprite.setPaletteEntry",
+        "sprite.setCel",
+        "sprite.unlinkCel",
+        "sprite.setTags",
+        "sprite.duplicateFrame",
+        "sprite.deleteFrame",
+        "sprite.detach",
+        "sprite.rasterizeTilemap",
+    ] {
+        let mut s = if command == "sprite.rasterizeTilemap" {
+            add_to_session(photocraft_io::import("tiles.aseprite", include_bytes!("../../../../io/tests/fixtures/aseprite/tiles.aseprite")).unwrap().document)
+        } else {
+            session()
+        };
+        if command == "sprite.unlinkCel" {
+            s.execute("timeline.setFrame", json!({"frame":1})).unwrap();
+        }
+        let id = s.active().unwrap().doc.layers[0].id.0;
+        let params = match command {
+            "sprite.setDuration" => json!({"durationMs":47}),
+            "sprite.setPaletteEntry" => json!({"index":0,"rgba":[12,34,56,255],"name":"Original"}),
+            "sprite.setCel" => json!({"layer":id,"x":-2,"opacity":127,"zIndex":-1}),
+            "sprite.unlinkCel" | "sprite.rasterizeTilemap" => json!({"layer":id}),
+            "sprite.setTags" => json!({"tags":[{"name":"Walk","from":0,"to":1,"direction":2,"repeat":2,"color":[1,2,3]}]}),
+            _ => json!({}),
+        };
+        let before = s.active().unwrap().doc.clone();
+        let n = s.active().unwrap().history.past_len();
+        s.execute(command, params).unwrap();
+        let after = s.active().unwrap().doc.clone();
+        assert_ne!(before, after, "{command}");
+        assert_eq!(s.active().unwrap().history.past_len(), n + 1, "{command}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.active().unwrap().doc, before, "{command}: undo");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(s.active().unwrap().doc, after, "{command}: redo");
+    }
+}
+
+#[test]
+fn frame_delay_gestures_coalesce_separately_and_queries_add_no_history() {
+    let mut s = session();
+    for (gesture, values) in [("first", [47, 63, 80]), ("second", [90, 100, 110])] {
+        for ms in values {
+            s.execute("sprite.setDuration", json!({"durationMs":ms,"coalesce":gesture})).unwrap();
+        }
+    }
+    assert_eq!(s.active().unwrap().history.past_len(), 2);
+    s.execute("sprite.info", json!({})).unwrap();
+    s.execute("sprite.playback", json!({"elapsedMs":12})).unwrap();
+    assert_eq!(s.active().unwrap().history.past_len(), 2);
+    for (command, ms) in [("edit.undo", 80), ("edit.undo", 17), ("edit.redo", 80), ("edit.redo", 110)] {
+        s.execute(command, json!({})).unwrap();
+        assert_eq!(s.active().unwrap().doc.sprite.as_ref().unwrap().frame_duration_ms(), ms);
+    }
+}
+
+#[test]
+fn cel_edits_respect_target_and_inherited_locks_without_mutating_history() {
+    for inherited in [false, true] {
+        let original = session().active().unwrap().doc.as_ref().clone();
+        let id = original.layers[0].id;
+        let mut locked = original.clone();
+        if inherited {
+            locked = in_group(locked, true, false);
+        } else {
+            locked.layers[0].locks.all = true;
+        }
+        let mut s = add_to_session(locked);
+        for command in ["sprite.setCel", "sprite.unlinkCel"] {
+            assert!(s.disabled_reason_with(command, &json!({"layer":id.0})).is_some());
+            assert_refused_unchanged(&mut s, command, json!({"layer":id.0,"x":2,"opacity":127}));
+        }
+        let mut position = original;
+        if inherited {
+            position = in_group(position, false, true);
+        } else {
+            position.layers[0].locks.position = true;
+        }
+        let mut s = add_to_session(position);
+        for field in ["x", "y", "zIndex"] {
+            let mut params = json!({"layer":id.0});
+            params[field] = json!(2);
+            assert_refused_unchanged(&mut s, "sprite.setCel", params);
+        }
+        // Position locks do not prevent opacity edits. The explicit child target works
+        // even when the group's row, rather than that child, is active.
+        s.execute("sprite.setCel", json!({"layer":id.0,"opacity":127})).unwrap();
+        assert_eq!(s.active().unwrap().doc.sprite.as_ref().unwrap().frames[0].cels[&id].opacity, 127);
+    }
+}
+
+#[test]
+fn rasterization_is_disabled_in_locked_groups_but_explicitly_unlocks_its_own_cache() {
+    let doc = photocraft_io::import("tiles.aseprite", include_bytes!("../../../../io/tests/fixtures/aseprite/tiles.aseprite")).unwrap().document;
+    let id = doc.layers[0].id;
+    let mut s = add_to_session(in_group(doc, true, false));
+    assert!(s.disabled_reason_with("sprite.rasterizeTilemap", &json!({"layer":id.0})).is_some());
+    assert_refused_unchanged(&mut s, "sprite.rasterizeTilemap", json!({"layer":id.0}));
+    s.edit("Unlock Group", |doc, _| {
+        doc.layers[0].locks.all = false;
+        Ok(())
+    })
+    .unwrap();
+    s.execute("sprite.rasterizeTilemap", json!({"layer":id.0})).unwrap();
+    assert!(!s.active().unwrap().doc.layer(id).unwrap().locks.all);
 }
 
 #[test]

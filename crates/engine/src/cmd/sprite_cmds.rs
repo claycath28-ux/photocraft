@@ -10,7 +10,42 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 fn enabled(s: &Session) -> std::result::Result<(), String> {
-    if s.active().is_some_and(|s| s.doc.sprite.is_some()) { Ok(()) } else { Err("no cel animation".into()) }
+    let doc = &s.active().ok_or("no document open")?.doc;
+    if doc.sprite.is_none() {
+        return Err("no cel animation".into());
+    }
+    if doc.depth != photocraft_color::SampleType::U8
+        || !matches!(doc.mode, photocraft_color::ColorMode::Rgb | photocraft_color::ColorMode::Grayscale | photocraft_color::ColorMode::Indexed)
+    {
+        return Err("Aseprite cel animation requires 8-bit RGB, grayscale or indexed samples".into());
+    }
+    Ok(())
+}
+
+fn cel_enabled(s: &Session) -> std::result::Result<(), String> {
+    enabled(s)?;
+    let state = s.active().ok_or("no document open")?;
+    let id = state.active_layer.ok_or("no active layer")?;
+    crate::commands::check_all_unlocked(&state.doc, id).map_err(|e| e.to_string())
+}
+
+fn check_tilemap_parent(doc: &photocraft_doc::Document, id: LayerId) -> Result<()> {
+    let path = doc.path_of(id).ok_or(EngineError::NoLayer(id))?;
+    let parents = path.get(..path.len().saturating_sub(1)).ok_or_else(|| bad("layer path is missing"))?;
+    if doc.locks_at(parents).all {
+        return Err(bad("unlock the parent group before rasterizing its tilemap"));
+    }
+    Ok(())
+}
+
+fn tilemap_enabled(s: &Session) -> std::result::Result<(), String> {
+    enabled(s)?;
+    let state = s.active().ok_or("no document open")?;
+    let id = state.active_layer.ok_or("no active layer")?;
+    if !state.doc.sprite.as_ref().is_some_and(|sprite| sprite.tilemap_descriptor(id).is_some()) {
+        return Err("layer is not a retained tilemap".into());
+    }
+    check_tilemap_parent(&state.doc, id).map_err(|e| e.to_string())
 }
 fn bad(message: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: "sprite".into(), msg: message.into() }
@@ -91,6 +126,9 @@ fn palette(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn cel(s: &mut Session, p: &Value) -> Result<Value> {
     let layer = LayerId(integer(p, "layer", u64::MAX)?);
+    let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+    crate::commands::check_all_unlocked(doc, layer)?;
+    let position_locked = doc.effective_locks(layer).position;
     mutate(s, "Cel Properties", |sprite| {
         let at = p.get("frame").map(|_| integer(p, "frame", 9999).map(|n| n as usize)).transpose()?.unwrap_or(sprite.current);
         let frame = Arc::make_mut(sprite.frames.get_mut(at).ok_or_else(|| bad("frame is out of range"))?);
@@ -98,9 +136,11 @@ fn cel(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(opacity) = p.get("opacity") {
             cel.opacity = opacity.as_u64().filter(|n| *n <= 255).ok_or_else(|| bad("opacity must be a byte"))? as u8;
         }
-        if let Some(z) = p.get("zIndex") {
-            cel.z_index = i16::try_from(z.as_i64().ok_or_else(|| bad("zIndex must be signed 16-bit"))?).map_err(|_| bad("zIndex must be signed 16-bit"))?;
-        }
+        let z = p
+            .get("zIndex")
+            .map(|z| i16::try_from(z.as_i64().ok_or_else(|| bad("zIndex must be signed 16-bit"))?).map_err(|_| bad("zIndex must be signed 16-bit")))
+            .transpose()?
+            .unwrap_or(cel.z_index);
         let position = |key, default| {
             p.get(key)
                 .map(|v| v.as_i64().and_then(|n| i16::try_from(n).ok()).map(i32::from).ok_or_else(|| bad(format!("{key} must be signed 16-bit"))))
@@ -110,6 +150,10 @@ fn cel(s: &mut Session, p: &Value) -> Result<Value> {
         let (x, y) = (position("x", cel.rect.x0)?, position("y", cel.rect.y0)?);
         let (dx, dy) =
             (x.checked_sub(cel.rect.x0).ok_or_else(|| bad("cel offset overflow"))?, y.checked_sub(cel.rect.y0).ok_or_else(|| bad("cel offset overflow"))?);
+        if position_locked && (dx != 0 || dy != 0 || z != cel.z_index) {
+            return Err(bad("the cel's layer or parent group is position-locked"));
+        }
+        cel.z_index = z;
         if dx != 0 || dy != 0 {
             cel.pixels = cel.pixels.translated(dx, dy, cel.rect);
             cel.indices = cel.indices.as_ref().map(|s| s.translated(dx, dy, cel.rect));
@@ -130,6 +174,7 @@ fn cel(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn unlink(s: &mut Session, p: &Value) -> Result<Value> {
     let id = LayerId(integer(p, "layer", u64::MAX)?);
+    crate::commands::check_all_unlocked(&s.active().ok_or(EngineError::NoDocument)?.doc, id)?;
     mutate(s, "Unlink Cel", |sprite| {
         let frame = Arc::make_mut(sprite.frames.get_mut(sprite.current).ok_or_else(|| bad("frame is missing"))?);
         Arc::make_mut(frame.cels.get_mut(&id).ok_or_else(|| bad("layer has no cel"))?).linked_frame = None;
@@ -254,6 +299,9 @@ fn detach(s: &mut Session) -> Result<Value> {
 fn rasterize_tilemap(s: &mut Session, p: &Value) -> Result<Value> {
     let id = LayerId(integer(p, "layer", u64::MAX)?);
     s.edit("Rasterize Tilemap", |doc, _| {
+        // Its own lock protects the retained display cache and is explicitly removed by
+        // rasterization. A locked ancestor still protects the contents of that group.
+        check_tilemap_parent(doc, id)?;
         let sprite = doc.sprite.as_mut().ok_or_else(|| bad("no cel animation"))?;
         if sprite.tilemap_descriptor(id).is_none() {
             return Err(bad("layer is not a retained tilemap"));
@@ -307,13 +355,19 @@ pub fn specs() -> Vec<CommandSpec> {
         },
         spec!("sprite.setDuration", "Frame Delay", "{durationMs:0..65535,frame?:index}", duration),
         spec!("sprite.setPaletteEntry", "Palette Entry", "{index:0..255,rgba:[r,g,b,a],name?:string}", palette),
-        spec!("sprite.setCel", "Cel Properties", "{layer,frame?:index,x?:i16,y?:i16,opacity?:0..255,zIndex?:i16}", cel),
-        spec!("sprite.unlinkCel", "Unlink Cel", "{layer}", unlink),
+        CommandSpec {
+            enabled: cel_enabled,
+            ..spec!("sprite.setCel", "Cel Properties", "{\"layer\":id,frame?:index,x?:i16,y?:i16,opacity?:0..255,zIndex?:i16}", cel)
+        },
+        CommandSpec { enabled: cel_enabled, ..spec!("sprite.unlinkCel", "Unlink Cel", "{\"layer\":id}", unlink) },
         spec!("sprite.setTags", "Animation Tags", "{tags:[{name,from,to,direction:0..3,repeat:0..65535,color:[r,g,b]}]}", tags),
         spec!("sprite.duplicateFrame", "Duplicate Cel Frame", "{}", |s, _| duplicate(s)),
         spec!("sprite.deleteFrame", "Delete Cel Frame", "{}", |s, _| remove_frame(s)),
         spec!("sprite.detach", "Keep Selected Frame", "{} → {sprite:null,keptSelectedFrame:true}", |s, _| detach(s)),
-        spec!("sprite.rasterizeTilemap", "Rasterize Tilemap", "{layer} → editable pixel cels (explicitly replaces tile ids)", rasterize_tilemap),
+        CommandSpec {
+            enabled: tilemap_enabled,
+            ..spec!("sprite.rasterizeTilemap", "Rasterize Tilemap", "{\"layer\":id} → editable pixel cels (explicitly replaces tile ids)", rasterize_tilemap)
+        },
     ]
 }
 
