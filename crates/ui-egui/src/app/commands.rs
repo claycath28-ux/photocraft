@@ -270,6 +270,8 @@ impl PhotocraftApp {
         };
         if !same_document {
             self.ui.selected_path = None;
+            self.ui.timeline.sprite_tag = None;
+            self.ui.timeline.playing = false;
         }
         self.path_document = document;
         vector_ui::cancel_stale_pen(self);

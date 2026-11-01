@@ -19,6 +19,9 @@ Per-frame palettes and transparent-index/background semantics survive native and
 Painting uses the selected palette; unchanged pixels retain their original indices. A palette
 edit recolors its frame without rebuilding indices from RGB. A newly created PhotoCraft indexed
 document has expanded pixels; its first Aseprite export assigns indices from its color table.
+An opaque indexed document reserves an unused transparent index for ordinary layers without
+turning them into Background layers. If no index is available, or its pixels have transparency
+but its color table has no transparent entry, export refuses with an explanation.
 
 Layer names, hierarchy, original order, visibility, opacity, locks, collapsed groups, background
 and reference flags, linked-cel preferences and UUIDs are retained. Cel opacity remains separate
@@ -41,6 +44,8 @@ A tag selector follows forward, reverse, ping-pong and reverse ping-pong directi
 repeat counts. Zero-duration frames play as fast as the UI allows (at least 1 ms for scheduling),
 while their stored zero duration is preserved. Navigation/playback do not add history steps.
 A delay drag or numeric typing session is one undo step; a new gesture creates a separate step.
+Pause keeps the displayed frame; starting a selected tag begins at its first playback frame.
+Switching documents clears the selected tag and stops playback.
 
 Painting and filters capture the selected frame's image; linked cels share that image, so an
 edit propagates across links while retaining each cel's position/opacity/z-order and frame palette.
@@ -77,17 +82,24 @@ also refused. These errors preserve the original document and explain the affect
 
 Save writes supported sprites back to their source; Save As `.pcraft` retains the complete
 sprite model, including exact indices, cel links, frame palettes and all retained metadata.
+Native bundles containing sprites use manifest version 2, which earlier builds refuse to open
+instead of dropping animation on save. Static bundles continue to use version 1; current builds
+read both versions.
 The Aseprite → `.pcraft` → Aseprite path is covered by integration tests and an independent
 reader. A PSD or flat export is a copy of the selected frame and warns that animation, exact
 indices and Aseprite metadata require `.aseprite`/`.pcraft`; it does not become the sprite's
 writable source. Photoshop-specific content, masks, clipping/effects or blending that Aseprite
 cannot encode are refused with guidance to rasterize/convert a copy first.
+Extra alpha/spot channels and document text, XMP or EXIF metadata also require a native copy;
+Aseprite export refuses to discard them silently. ICC profiles are validated before export.
 
 ICC, sRGB, linear and other positive fixed-gamma profiles are retained. Untagged files stay
 untagged. Palette names/alpha, tags/repeats, sprite/layer/cel/tag user data (including typed nested
 properties), slices/pivots/nine-patch data, external references and legacy mask/path records are
 retained in bounded native blobs and re-emitted with their object associations. External files
 are never followed. Explicit layer/cel deletion removes metadata owned by the deleted object.
+Canvas size changes, flips and rotations are refused while retained slice coordinates are
+present, since PhotoCraft cannot yet transform those keys with the pixels.
 
 ## Limits and evidence
 
@@ -138,3 +150,11 @@ The application-saved indexed animation on frame 2 of 3, with its 83 ms delay an
 layer. The view is panned above the floating Timeline so the complete 3 × 2 canvas is visible.
 
 ![Indexed animation with variable-duration Timeline](images/aseprite/animation-timeline.png)
+
+The Pause regression uses the same synthetic fixture with its delays set to 1000 ms. Both
+captures run identical tag-selection, Play and Pause inputs. Before the correction, Pause
+jumps to frame 1; afterward, it keeps the displayed frame 2.
+
+| Before | After |
+|---|---|
+| ![Pause incorrectly rewinds the selected tag](images/aseprite/timeline-pause-before.png) | ![Pause retains the displayed frame](images/aseprite/timeline-pause-after.png) |

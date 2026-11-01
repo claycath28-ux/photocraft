@@ -205,7 +205,8 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
         app.ui.timeline.playing = !app.ui.timeline.playing;
         app.ui.timeline.last_time = ctx.input(|i| i.time);
         app.ui.timeline.sprite_start = app.ui.timeline.last_time - sprite_time.unwrap_or(0.0);
-        if let Some(tag) = app.ui.timeline.sprite_tag
+        if app.ui.timeline.playing
+            && let Some(tag) = app.ui.timeline.sprite_tag
             && let Some(start) = app.session.active().and_then(|d| d.doc.sprite.as_ref()).and_then(|s| s.playback_frame(0, Some(tag)).ok()).map(|v| v.0)
         {
             let _ = app.run("timeline.setFrame", json!({"frame":start}));
@@ -267,6 +268,7 @@ mod tests {
         let doc = photocraft_io::import("animation.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.add_document(doc, None);
+        app.sync_views();
         app.ui.timeline.open = true;
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(0.01).build_ui_state(|ui, app| windows(app, ui.ctx()), app);
         h.run_steps(2);
@@ -338,6 +340,7 @@ mod tests {
         let doc = photocraft_io::import("animation.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         app.session.add_document(doc, None);
+        app.sync_views();
         app.ui.timeline.open = true;
         app.ui.timeline.playing = true;
         app.ui.timeline.sprite_start = 0.0;
@@ -411,5 +414,70 @@ mod tests {
         h.run_steps(2);
         assert!(!h.state().ui.timeline.playing, "scrubbing pauses playback");
         assert!(h.state().session.active().unwrap().doc.timeline.as_ref().unwrap().current > 0);
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+    use std::sync::Arc;
+
+    fn app() -> PhotocraftApp {
+        let mut doc = photocraft_io::import("animation.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+        let sprite = doc.sprite.as_mut().unwrap();
+        for frame in &mut sprite.frames {
+            Arc::make_mut(frame).duration_ms = 1000;
+        }
+        sprite.tags[0].from = 1;
+        sprite.tags[0].to = 2;
+        sprite.tags[0].direction = 0;
+        sprite.tags[0].repeat = 0;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.add_document(doc, None);
+        app.sync_views();
+        app.ui.timeline.open = true;
+        app.ui.timeline.sprite_tag = Some(0);
+        app
+    }
+
+    #[test]
+    fn pausing_a_tag_keeps_the_displayed_frame_and_play_starts_at_the_tag_start() {
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(0.01).build_ui_state(|ui, app| windows(app, ui.ctx()), app());
+        h.run_steps(2);
+        h.get_by_label("Play").click();
+        h.run_steps(2);
+        assert!(h.state().ui.timeline.playing);
+        assert_eq!(h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().current, 1);
+        let now = h.ctx.input(|i| i.time);
+        h.state_mut().ui.timeline.sprite_start = now - 1.5;
+        h.run_steps(1);
+        assert_eq!(h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().current, 2);
+        h.get_by_label("Pause").click();
+        h.run_steps(2);
+        assert!(!h.state().ui.timeline.playing);
+        assert_eq!(h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().current, 2);
+        h.get_by_label("Play").click();
+        h.run_steps(2);
+        assert_eq!(h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().current, 1);
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), 0);
+    }
+
+    #[test]
+    fn selected_tags_and_playback_belong_to_the_active_document_and_survive_ordinary_edits() {
+        let mut app = app();
+        app.ui.timeline.playing = true;
+        app.run("sprite.setDuration", json!({"durationMs": 900})).unwrap();
+        assert_eq!(app.ui.timeline.sprite_tag, Some(0));
+        assert!(app.ui.timeline.playing);
+        let second = photocraft_io::import("second.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+        app.session.add_document(second, None);
+        app.sync_views();
+        assert_eq!(app.ui.timeline.sprite_tag, None, "the same tag index in another sprite isn't a selection");
+        assert!(!app.ui.timeline.playing);
+        app.ui.timeline.sprite_tag = Some(0);
+        app.run("document.activate", json!({"document": 0})).unwrap();
+        assert_eq!(app.ui.timeline.sprite_tag, None);
+        assert!(!app.ui.timeline.playing);
     }
 }
