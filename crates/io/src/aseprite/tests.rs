@@ -606,7 +606,9 @@ fn export_refuses_extra_channels_and_unrepresentable_document_metadata() {
         assert!(crate::export(&doc, "aseprite", &Default::default()).is_err());
         assert_eq!(doc, before);
         let native = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
-        assert_eq!(photocraft_format::load_from_bytes(&native).unwrap().metadata, doc.metadata);
+        let reloaded = photocraft_format::load_from_bytes(&native).unwrap();
+        assert_eq!(reloaded.metadata, doc.metadata);
+        assert_eq!(reloaded.channels, doc.channels);
     }
 }
 
@@ -696,4 +698,49 @@ fn a_full_opaque_palette_needs_a_spare_index_only_on_ordinary_layers() {
     let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
     let back = read(&out.bytes).unwrap().document;
     assert_eq!(back.layers[0].surface().unwrap().to_interleaved(back.bounds()), pixels);
+}
+
+#[test]
+fn export_refuses_named_paths_notes_and_layer_xmp_without_changing_the_source() {
+    let original = read(include_bytes!("../../tests/fixtures/aseprite/layers.aseprite")).unwrap().document;
+    let changes: [fn(&mut photocraft_doc::Document); 3] = [
+        |d| d.paths.push(photocraft_doc::NamedPath { name: "Keep path".into(), ..Default::default() }),
+        |d| d.notes.push(photocraft_doc::Note { text: "Keep note".into(), ..Default::default() }),
+        |d| d.layers[0].xmp = Some(Arc::from("<x:xmpmeta/>")),
+    ];
+    for change in changes {
+        let mut doc = original.clone();
+        change(&mut doc);
+        let before = doc.clone();
+        assert!(!super::losses(&doc).is_empty());
+        for ext in ["aseprite", "ase"] {
+            assert!(crate::export(&doc, ext, &Default::default()).is_err());
+            assert_eq!(doc, before);
+        }
+        let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+        let back = photocraft_format::load_from_bytes(&bytes).unwrap();
+        assert_eq!(back.paths, doc.paths);
+        assert_eq!(back.notes, doc.notes);
+        assert_eq!(back.layers[0].xmp, doc.layers[0].xmp);
+    }
+}
+
+#[test]
+fn rgb_and_grayscale_backgrounds_keep_their_background_traits_on_export_and_resave() {
+    for fmt in [PixelFormat::RGBA8, PixelFormat::new(ColorMode::Grayscale, SampleType::U8, true)] {
+        let mut doc = photocraft_doc::Document::new("Background", photocraft_geom::Size::new(2, 1), fmt.mode, SampleType::U8);
+        let mut layer = photocraft_doc::Layer::raster("Background", fmt);
+        layer.locks.position = true;
+        layer.locks.transparency = true;
+        layer.surface_mut().unwrap().fill_rect(doc.bounds(), &[1.0, 1.0, 1.0, 1.0]);
+        doc.layers.push(layer);
+        assert!(doc.background().is_some());
+        for _ in 0..2 {
+            let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+            let back = read(&out.bytes).unwrap().document;
+            assert!(back.background().is_some(), "{fmt:?}");
+            assert_eq!(back.layers[0].surface().unwrap().to_interleaved(back.bounds()), doc.layers[0].surface().unwrap().to_interleaved(doc.bounds()));
+            doc = back;
+        }
+    }
 }

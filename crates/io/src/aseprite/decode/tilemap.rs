@@ -49,7 +49,7 @@ fn append_bounded(pixels: &mut Vec<u8>, block: &[u8], expected: usize) -> Result
     Ok(())
 }
 
-pub(in crate::aseprite) fn tileset(data: &[u8], bpp: usize, ctl: &Interrupt<'_>) -> Result<Tileset> {
+pub(in crate::aseprite) fn tileset(data: &[u8], bpp: usize, budget: usize, ctl: &Interrupt<'_>) -> Result<Tileset> {
     let mut r = Reader::new(data);
     let id = r.u32()?;
     let flags = r.u32()?;
@@ -72,6 +72,9 @@ pub(in crate::aseprite) fn tileset(data: &[u8], bpp: usize, ctl: &Interrupt<'_>)
         return Err(invalid("tileset image exceeds 256 MiB"));
     }
     let pixels = if flags & 2 != 0 {
+        if expected > budget {
+            return Err(invalid("tilesets exceed the remaining decoded memory budget"));
+        }
         let len = r.u32()? as usize;
         Some(inflate(r.take(len)?, expected, ctl)?)
     } else {
@@ -204,7 +207,7 @@ impl Decoder<'_> {
             for c in &frame.metadata {
                 if c.kind == 0x2023 {
                     self.ctl.check().map_err(|_| IoError::Cancelled)?;
-                    let set = tileset(&c.bytes, source_bpp, self.ctl)?;
+                    let set = tileset(&c.bytes, source_bpp, self.budget.saturating_sub(decoded), self.ctl)?;
                     decoded = decoded.checked_add(set.pixels.as_ref().map_or(0, Vec::len)).ok_or_else(|| invalid("tileset size overflow"))?;
                     if decoded > self.budget {
                         return Err(invalid("tilesets exceed the remaining decoded memory budget"));
@@ -256,6 +259,37 @@ mod cancellation_tests {
         io::Write,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn tileset_budget_is_checked_before_inflation_and_accepts_the_exact_remaining_size() {
+        fn record(data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for n in [0u32, 2, 4] {
+                out.extend(n.to_le_bytes());
+            }
+            out.extend(1u16.to_le_bytes());
+            out.extend(1u16.to_le_bytes());
+            out.extend([0; 18]); // base index/reserved and empty name
+            out.extend((data.len() as u32).to_le_bytes());
+            out.extend(data);
+            out
+        }
+        let checks = AtomicUsize::new(0);
+        let cancel = || {
+            checks.fetch_add(1, Ordering::Relaxed);
+            false
+        };
+        let malformed = record(b"not zlib");
+        assert!(tileset(&malformed, 4, 15, &Interrupt::cancel_only(&cancel)).err().unwrap().to_string().contains("remaining decoded memory budget"));
+        assert_eq!(checks.load(Ordering::Relaxed), 0, "do not begin inflating an over-budget record");
+        assert!(tileset(&malformed, 4, 16, &Interrupt::NONE).is_err());
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Default::default());
+        encoder.write_all(&[7; 16]).unwrap();
+        let valid = record(&encoder.finish().unwrap());
+        assert_eq!(tileset(&valid, 4, 16, &Interrupt::NONE).unwrap().pixels.unwrap(), [7; 16]);
+        // A preceding tileset consumes one byte of the caller's total allowance.
+        assert!(tileset(&valid, 4, 16usize.saturating_sub(1), &Interrupt::NONE).is_err());
+    }
 
     #[test]
     fn oversized_output_is_refused_before_growing_or_changing_the_buffer() {

@@ -251,7 +251,13 @@ mod aseprite_tests {
         let doc = photocraft_format::load_path(&target).unwrap();
         assert_eq!(doc.layers.len(), 2);
         assert!(doc.layers[1].is_group());
-        assert_eq!(doc.sprite.as_ref().unwrap().frames.len(), 1, "native conversion keeps cel animation");
+        let sprite = doc.sprite.as_ref().unwrap();
+        assert_eq!(sprite.frames.len(), 1, "native conversion keeps cel animation");
+        let top = doc.walk().into_iter().find(|(_, _, layer)| layer.name == "Top").unwrap().2;
+        let cel = sprite.frames[0].cels.get(&top.id).unwrap();
+        assert_eq!(sprite.frames[0].cels.len(), 2);
+        assert_eq!((cel.rect.x0, cel.rect.y0, cel.rect.width(), cel.rect.height()), (1, 0, 1, 2));
+        assert_eq!(cel.pixels.to_interleaved(cel.rect), [0, 0, 255, 128, 0, 255, 0, 255]);
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         assert!(crate::batch::is_input(&source));
         let actions = dir.join("actions.json");

@@ -87,11 +87,11 @@ fn open_filters() -> Vec<(&'static str, Vec<String>)> {
 /// extension comes first, so a .pcraft document saves as .pcraft by default and everything else
 /// keeps defaulting to PSD.
 const SAVE_FILTERS: &[(&str, &[&str])] = &[
-    ("Aseprite", &["aseprite"]),
     ("PSD Document", &["psd", "psb"]),
     ("PDF", &["pdf"]),
     ("PhotoCraft", &["pcraft"]),
     ("OpenRaster", &["ora"]),
+    ("Aseprite", &["aseprite"]),
     ("PNG", &["png"]),
     ("JPEG", &["jpg", "jpeg"]),
     ("JPEG XL", &["jxl"]),

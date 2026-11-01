@@ -293,7 +293,7 @@ fn every_save_dialog_leads_with_its_own_extension() {
 #[test]
 fn save_as_offers_only_writable_formats_including_ico() {
     // Layered formats, and PDF, are written by `photocraft-io`, not a codec.
-    let layered = ["psd", "psb", "pcraft", "ora", "pdf"];
+    let layered = ["psd", "psb", "pcraft", "ora", "pdf", "aseprite"];
     for (name, exts) in SAVE_FILTERS {
         for ext in exts.iter().filter(|e| !layered.contains(e)) {
             let format = photocraft_codecs::from_extension(ext).unwrap_or_else(|| panic!("{name}: .{ext} is no known format"));

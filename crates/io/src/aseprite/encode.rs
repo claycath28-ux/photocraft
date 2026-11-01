@@ -86,7 +86,7 @@ pub(super) fn export(doc: &Document, ctl: &Interrupt<'_>) -> Result<ExportResult
         append_metadata(&mut chunks, &frame.metadata, &MetadataTarget::Frame)?;
         if frame_index == 0 {
             for (layer, level) in &layers {
-                chunks.push(layer_chunk(layer, *level, sprite, flags)?);
+                chunks.push(layer_chunk(layer, *level, sprite, flags, copy.is_background(layer.id))?);
                 append_metadata(&mut chunks, &frame.metadata, &MetadataTarget::Layer(layer.id))?;
             }
         }
@@ -260,9 +260,12 @@ fn layers<'a>(doc: &'a Document, sprite: &Sprite) -> Result<Vec<(&'a Layer, usiz
     Ok(out)
 }
 
-fn layer_chunk(layer: &Layer, level: usize, sprite: &Sprite, flags: u32) -> Result<Vec<u8>> {
+fn layer_chunk(layer: &Layer, level: usize, sprite: &Sprite, flags: u32, background: bool) -> Result<Vec<u8>> {
     let source = sprite.layers.iter().find(|l| l.id == layer.id);
     let mut bits = source.map_or(0, |s| s.flags) & (8 | 16 | 64);
+    if background && !sprite.indexed && sprite.tilemap_descriptor(layer.id).is_none() {
+        bits |= 8;
+    }
     if layer.visible {
         bits |= 1
     }
@@ -318,7 +321,7 @@ fn cel_chunk(index: usize, cel: &SpriteCel, indexed: bool, tilemap: Option<&[u8]
     if let Some(link) = cel.linked_frame {
         data.extend(u16::try_from(link).map_err(|_| invalid("linked frame index overflow"))?.to_le_bytes());
     } else if let Some(raw) = tilemap {
-        super::decode::tilemap::map(raw, ctl)?;
+        // validate_tilemaps already decoded and checked this record before encoding.
         data.extend(raw.get(16..).ok_or_else(|| invalid("truncated tilemap record"))?);
     } else {
         data.extend(u16::try_from(cel.rect.width()).map_err(|_| invalid("cel width overflow"))?.to_le_bytes());
@@ -428,7 +431,7 @@ fn validate_tilemaps(sprite: &Sprite, mode: ColorMode, ctl: &Interrupt<'_>) -> R
                 if i != 0 {
                     return Err(invalid("tilesets must be defined in the first frame"));
                 }
-                let set = tilemap::tileset(&c.bytes, fmt.bytes_per_pixel(), ctl)?;
+                let set = tilemap::tileset(&c.bytes, fmt.bytes_per_pixel(), sprite::MAX_BYTES.saturating_sub(bytes), ctl)?;
                 bytes = bytes.checked_add(set.pixels.as_ref().map_or(0, Vec::len)).ok_or_else(|| invalid("tileset size overflow"))?;
                 if bytes > sprite::MAX_BYTES {
                     return Err(invalid("tilesets exceed 256 MiB"));

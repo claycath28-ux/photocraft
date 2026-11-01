@@ -50,6 +50,7 @@ pub fn losses(doc: &Document) -> Vec<String> {
             || layer.blend_if != Default::default()
             || layer.advanced != Default::default()
             || layer.video.is_some()
+            || layer.xmp.is_some()
         {
             out.push("Aseprite cannot retain this document's non-raster content, masks or Photoshop blending/effects; rasterize a copy first".into());
             break;
@@ -60,6 +61,9 @@ pub fn losses(doc: &Document) -> Vec<String> {
     }
     if !doc.channels.is_empty() {
         out.push("Aseprite cannot retain extra alpha or spot channels; save a .pcraft copy instead".into());
+    }
+    if !doc.paths.is_empty() || !doc.notes.is_empty() {
+        out.push("Aseprite cannot retain named paths or notes; save a .pcraft copy instead".into());
     }
     if !doc.metadata.text.is_empty() || doc.metadata.xmp.is_some() || doc.metadata.exif.is_some() {
         out.push("Aseprite cannot retain document text, XMP or EXIF metadata; save a .pcraft copy instead".into());
