@@ -623,8 +623,8 @@ fn crop(s: &mut Session, p: &Value) -> Result<Value> {
     if r.is_empty() {
         return Err(EngineError::Other("nothing to crop: pass x/y/width/height or make a selection".into()));
     }
-    if (r.x0 != 0 || r.y0 != 0) && retained_slices {
-        return Err(EngineError::Other("this sprite has retained slice coordinates; remove slices from a copy before moving the canvas origin".into()));
+    if retained_slices && (r.x0 != 0 || r.y0 != 0 || target.size.is_some_and(|(w, h)| w != r.width() || h != r.height())) {
+        return Err(EngineError::Other("this sprite has retained slice coordinates; remove slices from a copy before moving or resampling the canvas".into()));
     }
     s.set_sampler_map(target.sampler_map(r));
     let extension = s.tools.background;

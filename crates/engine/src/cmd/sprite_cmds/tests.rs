@@ -342,3 +342,77 @@ fn crops_with_retained_slices_cannot_move_the_canvas_origin_even_at_the_same_siz
     assert_eq!(ordinary.active().unwrap().history.past_len(), 1);
     ordinary.execute("edit.undo", json!({})).unwrap();
 }
+
+#[test]
+fn slice_coordinates_prevent_crop_resampling_even_when_final_canvas_size_is_unchanged() {
+    use photocraft_doc::sprite::{MetadataTarget, SpriteChunk};
+    let mut s = session();
+    s.edit("Slice", |doc, _| {
+        Arc::make_mut(&mut doc.sprite.as_mut().unwrap().frames[0]).metadata.push(SpriteChunk {
+            kind: 0x2022,
+            target: MetadataTarget::Frame,
+            bytes: Arc::new(vec![]),
+        });
+        Ok(())
+    })
+    .unwrap();
+    for params in
+        [json!({"x":0,"y":0,"width":1,"height":1,"targetWidth":2,"targetHeight":1}), json!({"x":0,"y":0,"width":2,"height":2,"targetWidth":2,"targetHeight":1})]
+    {
+        assert_refused_unchanged(&mut s, "image.crop", params);
+    }
+    s.execute("image.crop", json!({"x":0,"y":0,"width":2,"height":1,"targetWidth":2,"targetHeight":1})).unwrap();
+    let mut ordinary = session();
+    let before = ordinary.active().unwrap().doc.clone();
+    ordinary.execute("image.crop", json!({"x":0,"y":0,"width":1,"height":1,"targetWidth":2,"targetHeight":1})).unwrap();
+    assert_eq!(ordinary.active().unwrap().doc.size, before.size);
+    assert_eq!(ordinary.active().unwrap().history.past_len(), 1);
+    ordinary.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(ordinary.active().unwrap().doc, before);
+}
+
+#[test]
+fn arbitrary_canvas_rotation_refuses_slices_for_same_size_turns_and_allows_a_noop() {
+    use photocraft_doc::sprite::{MetadataTarget, SpriteChunk};
+    let mut doc = (*session().active().unwrap().doc).clone();
+    doc.size = Size::new(2, 2);
+    Arc::make_mut(&mut doc.sprite.as_mut().unwrap().frames[0]).metadata.push(SpriteChunk {
+        kind: 0x2022,
+        target: MetadataTarget::Frame,
+        bytes: Arc::new(vec![]),
+    });
+    let mut s = add_to_session(doc);
+    for angle in [90, 180, 270, -90, 45] {
+        assert_refused_unchanged(&mut s, "image.rotation.arbitrary", json!({"angle":angle}));
+    }
+    let state = s.active().unwrap();
+    let before = state.doc.clone();
+    let history = state.history.past_len();
+    s.execute("image.rotation.arbitrary", json!({"angle":360})).unwrap();
+    assert_eq!(s.active().unwrap().doc, before);
+    assert_eq!(s.active().unwrap().history.past_len(), history);
+    let mut ordinary = session();
+    ordinary.execute("image.rotation.arbitrary", json!({"angle":180})).unwrap();
+    assert_eq!(ordinary.active().unwrap().history.past_len(), 1);
+    ordinary.execute("edit.undo", json!({})).unwrap();
+}
+
+#[test]
+fn rgb_and_gray_layer_from_background_stays_unlocked_after_aseprite_export() {
+    for mode in [ColorMode::Rgb, ColorMode::Grayscale] {
+        let doc = Document::with_background("Background", Size::new(2, 1), mode, SampleType::U8, photocraft_color::Color::WHITE);
+        let out = photocraft_io::export(&doc, "aseprite", &Default::default()).unwrap();
+        let doc = photocraft_io::import("background.aseprite", &out.bytes).unwrap().document;
+        let mut s = add_to_session(doc);
+        assert!(s.active().unwrap().doc.background().is_some());
+        s.execute("layer.new.layerFromBackground", json!({})).unwrap();
+        assert!(s.active().unwrap().doc.background().is_none());
+        let out = photocraft_io::export(&s.active().unwrap().doc, "aseprite", &Default::default()).unwrap();
+        let back = photocraft_io::import("unlocked.aseprite", &out.bytes).unwrap().document;
+        assert!(back.background().is_none());
+        assert!(!back.layers[0].locks.transparency);
+        assert!(!back.layers[0].locks.position);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(s.active().unwrap().doc.background().is_some());
+    }
+}
