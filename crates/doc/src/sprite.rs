@@ -97,7 +97,7 @@ pub struct SpriteTag {
     pub color: [u8; 3],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Sprite {
     pub frames: Vec<Arc<SpriteFrame>>,
     pub current: usize,
@@ -110,6 +110,22 @@ pub struct Sprite {
     pub tags: Vec<SpriteTag>,
     /// Color profile payload, retained for fixed-gamma/ICC round trips.
     pub profile: Option<Arc<Vec<u8>>>,
+}
+
+impl PartialEq for Sprite {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { frames, current, layers, indexed, transparent_index, pixel_aspect, grid, tags, profile } = self;
+        frames.len() == other.frames.len()
+            && frames.iter().zip(&other.frames).all(|(a, b)| Arc::ptr_eq(a, b) || a == b)
+            && *current == other.current
+            && *layers == other.layers
+            && *indexed == other.indexed
+            && *transparent_index == other.transparent_index
+            && *pixel_aspect == other.pixel_aspect
+            && *grid == other.grid
+            && *tags == other.tags
+            && *profile == other.profile
+    }
 }
 
 impl Sprite {
@@ -129,6 +145,7 @@ impl Sprite {
         let mut chunk_count = 0usize;
         let mut tiles = std::collections::HashSet::new();
         let mut palettes = std::collections::HashSet::new();
+        let mut index_tiles = std::collections::HashSet::new();
         for frame in &self.frames {
             let mut projected = 0usize;
             count = count.checked_add(frame.cels.len()).ok_or("sprite cel count overflow")?;
@@ -206,6 +223,7 @@ impl Sprite {
                     if f != photocraft_color::PixelFormat::new(photocraft_color::ColorMode::Grayscale, photocraft_color::SampleType::U8, false) {
                         return Err("invalid sprite index-plane format".into());
                     }
+                    validate_indices(indices, cel.rect, frame.palette.len(), &mut index_tiles)?;
                 }
             }
         }
@@ -279,4 +297,42 @@ impl Sprite {
         }
         self.validate()
     }
+}
+
+/// Check samples actually used by a cel, including sparse default pixels. Shared tiles and
+/// full 256-entry palettes need no repeated scan while validating linked animation frames.
+fn validate_indices(
+    indices: &Surface,
+    rect: Rect,
+    palette_len: usize,
+    checked: &mut std::collections::HashSet<(usize, usize, [i32; 4])>,
+) -> Result<(), String> {
+    if palette_len == 256 || rect.is_empty() {
+        return Ok(());
+    }
+    let mut occupied = 0u64;
+    for (tc, tile) in indices.tiles() {
+        let tile_rect = tc.rect();
+        let used = rect.intersect(&tile_rect);
+        if used.is_empty() {
+            continue;
+        }
+        occupied += 1;
+        let bounds = [used.x0 - tile_rect.x0, used.y0 - tile_rect.y0, used.x1 - tile_rect.x0, used.y1 - tile_rect.y0];
+        if !checked.insert((Arc::as_ptr(tile) as usize, palette_len, bounds)) {
+            continue;
+        }
+        for y in bounds[1]..bounds[3] {
+            let start = y as usize * 256 + bounds[0] as usize;
+            let end = y as usize * 256 + bounds[2] as usize;
+            let row = tile.bytes().get(start..end).ok_or("invalid sprite index tile length")?;
+            if row.iter().any(|v| usize::from(*v) >= palette_len) {
+                return Err("sprite pixel refers to a missing palette entry".into());
+            }
+        }
+    }
+    if occupied < rect.tile_count() && indices.default_pixel().first().is_some_and(|v| (*v * 255.0).round() as usize >= palette_len) {
+        return Err("sprite default pixel refers to a missing palette entry".into());
+    }
+    Ok(())
 }

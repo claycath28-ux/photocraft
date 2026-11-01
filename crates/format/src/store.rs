@@ -933,7 +933,9 @@ impl PcraftWriter {
         let mut c = Collect { hash_cache: Some(&mut self.hash_cache), blob_hash_cache: Some(&mut self.blob_hash_cache), ..Default::default() };
         let document = convert::doc_m(doc, &mut c);
         let manifest = Manifest {
-            format_version: FORMAT_VERSION,
+            // Static bundles stay readable by version-1 builds. Only animation needs the
+            // newer reader, which understands and preserves the sprite field.
+            format_version: if doc.sprite.is_some() { FORMAT_VERSION } else { 1 },
             generator: format!("photocraft-format {}", env!("CARGO_PKG_VERSION")),
             document,
             thumbnail: opts.thumbnail.as_ref().map(|_| THUMB.to_owned()),

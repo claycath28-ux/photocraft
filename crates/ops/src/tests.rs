@@ -949,7 +949,7 @@ fn video_memory_counts_originals_and_deduplicates_displayed_frames() {
 
 #[test]
 fn sprite_memory_counts_off_playhead_tiles_indices_and_metadata_shared_with_history() {
-    use photocraft_doc::sprite::{MetadataTarget, Sprite, SpriteCel, SpriteChunk, SpriteFrame, SpriteLayer};
+    use photocraft_doc::sprite::{MetadataTarget, PaletteEntry, Sprite, SpriteCel, SpriteChunk, SpriteFrame, SpriteLayer, SpriteTag};
     let mut doc = Document::new("Sprite", Size::new(2, 2), ColorMode::Indexed, SampleType::U8);
     let mut layer = Layer::raster("Ink", photocraft_doc::PixelFormat::RGBA8);
     let mut pixels = photocraft_doc::Surface::new(photocraft_doc::PixelFormat::RGBA8);
@@ -970,26 +970,36 @@ fn sprite_memory_counts_off_playhead_tiles_indices_and_metadata_shared_with_hist
     });
     let frame = Arc::new(SpriteFrame {
         duration_ms: 17,
-        palette: Arc::new(vec![]),
+        palette: Arc::new(vec![
+            PaletteEntry { rgba: [0, 0, 0, 255], name: "Black".into() },
+            PaletteEntry { rgba: [255, 0, 0, 255], name: "Red".into() },
+            PaletteEntry { rgba: [0, 0, 255, 255], name: "Blue".into() },
+        ]),
         cels: [(id, cel)].into(),
         metadata: vec![SpriteChunk { kind: 0x2020, target: MetadataTarget::Sprite, bytes: Arc::new(vec![0; 400]) }],
     });
+    let mut off = frame.as_ref().clone();
+    let off_cel = Arc::make_mut(off.cels.get_mut(&id).unwrap());
+    off_cel.pixels.write_pixel(0, 0, &[0.0, 0.0, 1.0, 1.0]);
+    off_cel.indices.as_mut().unwrap().write_pixel(0, 0, &[2.0 / 255.0]);
+    let palette_bytes = 3 * std::mem::size_of::<PaletteEntry>() + "Black".len() + "Red".len() + "Blue".len();
+    let tag_bytes = std::mem::size_of::<SpriteTag>() + "Walk".len();
     doc.sprite = Some(Sprite {
-        frames: vec![frame.clone(), frame],
+        frames: vec![frame, Arc::new(off)],
         current: 0,
         layers: vec![SpriteLayer { id, flags: 3, opacity: 255, uuid: None }],
         indexed: true,
         transparent_index: 0,
         pixel_aspect: [1, 1],
         grid: [0; 4],
-        tags: vec![],
-        profile: None,
+        tags: vec![SpriteTag { name: "Walk".into(), from: 0, to: 1, direction: 0, repeat: 0, color: [0; 3] }],
+        profile: Some(Arc::new(vec![0; 200])),
     });
     let mut cur = Arc::new(doc);
     let mut h = History { max_bytes: usize::MAX, ..History::default() };
-    assert_eq!(h.pixel_bytes(&cur), 256 * 256 * 5 + 400, "display/cels/frame aliases count once");
+    assert_eq!(h.pixel_bytes(&cur), 2 * 256 * 256 * 5 + 400 + palette_bytes + 200 + tag_bytes, "display/cels/frame aliases count once");
     edit(&mut h, &mut cur, "Remove animation", |doc| doc.sprite = None);
-    assert_eq!(h.pixel_bytes(&cur), 256 * 256 * 5 + 400, "undo still owns indices and metadata");
+    assert_eq!(h.pixel_bytes(&cur), 2 * 256 * 256 * 5 + 400 + palette_bytes + 200 + tag_bytes, "undo still owns indices and metadata");
     edit(&mut h, &mut cur, "Rename", |doc| doc.name = "Static".into());
     h.max_bytes = 10 * 256 * 256;
     h.trim(&cur);

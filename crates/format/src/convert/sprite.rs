@@ -8,7 +8,7 @@ use std::{
 
 use photocraft_doc::{
     LayerId,
-    sprite::{MAX_CELS, MAX_FRAMES, MAX_METADATA, Sprite, SpriteCel, SpriteChunk, SpriteFrame},
+    sprite::{MAX_BYTES, MAX_CELS, MAX_FRAMES, MAX_METADATA, Sprite, SpriteCel, SpriteChunk, SpriteFrame},
 };
 
 use super::{FormatError, Loader, Result, Sink, surface_m};
@@ -73,6 +73,7 @@ impl Loader<'_> {
         {
             return Err(bad("invalid sprite frame/palette/layer count"));
         }
+        check_tile_budget(m)?;
         let palettes: Vec<_> = m.palettes.iter().map(|p| Arc::new(p.clone())).collect();
         let mut count = 0usize;
         let mut metadata_bytes = 0usize;
@@ -124,5 +125,107 @@ impl Loader<'_> {
         };
         sprite.remap_layers(|id| self.id_map.get(&id.0).copied()).map_err(FormatError::corrupt)?;
         Ok(sprite)
+    }
+}
+
+// Hash/sample pairs match Loader::surface's allocation cache.
+fn check_tile_budget(m: &SpriteM) -> Result<()> {
+    let bad = |message: &str| FormatError::corrupt(message);
+    // Preflight distinct tile allocations before fetching any cel surface. The bundle's
+    // overall budget is much larger than a sprite's, and validation after decode is late.
+    let mut tiles = std::collections::HashSet::new();
+    let mut tile_bytes = 0usize;
+    for surface in m.frames.iter().flat_map(|f| &f.cels).flat_map(|c| std::iter::once(&c.pixels).chain(c.indices.iter())) {
+        for tile in &surface.tiles {
+            if tiles.insert((surface.format.sample, &tile.hash)) {
+                tile_bytes = tile_bytes.checked_add(super::tile_len(&surface.format)).ok_or_else(|| bad("sprite tile budget overflow"))?;
+                if tile_bytes > MAX_BYTES {
+                    return Err(bad("sprite decoded tiles exceed 256 MiB"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        convert::Fetch,
+        manifest::{SpriteCelM, SurfaceM, TileRef},
+    };
+    use photocraft_color::PixelFormat;
+
+    fn manifest(unique: bool) -> SpriteM {
+        let cel = SpriteCelM {
+            layer: 1,
+            rect: photocraft_geom::Rect::from_xywh(0, 0, 8448, 8192),
+            pixels: SurfaceM {
+                format: PixelFormat::RGBA8,
+                default: "00000000".into(),
+                tiles: (0..1025).map(|i| TileRef { tx: i % 33, ty: i / 33, hash: format!("{:064x}", if unique { i } else { 0 }) }).collect(),
+            },
+            indices: None,
+            opacity: 255,
+            z_index: 0,
+            linked_frame: None,
+            precise: None,
+        };
+        SpriteM {
+            current: 0,
+            layers: vec![],
+            indexed: false,
+            transparent_index: 0,
+            pixel_aspect: [1, 1],
+            grid: [0; 4],
+            tags: vec![],
+            profile: None,
+            palettes: vec![vec![]],
+            frames: vec![SpriteFrameM { duration_ms: 100, palette: 0, cels: vec![cel], metadata: vec![] }],
+        }
+    }
+
+    #[test]
+    fn sprite_budget_is_checked_before_fetching_tiles_and_shared_hashes_count_once() {
+        struct FetchSpy(usize);
+        impl Fetch for FetchSpy {
+            fn tile(&mut self, _: &str, _: usize) -> Result<Vec<u8>> {
+                self.0 += 1;
+                Err(FormatError::corrupt("unexpected tile fetch"))
+            }
+            fn blob(&mut self, _: &str) -> Result<Arc<Vec<u8>>> {
+                Err(FormatError::corrupt("unexpected blob fetch"))
+            }
+            fn blob_bounded(&mut self, _: &str, _: usize) -> Result<Arc<Vec<u8>>> {
+                Err(FormatError::corrupt("unexpected blob fetch"))
+            }
+        }
+        let mut fetch = FetchSpy(0);
+        let mut loader = Loader {
+            fetch: &mut fetch,
+            preserve_ids: true,
+            id_map: Default::default(),
+            contents_id_map: Default::default(),
+            legacy_linked_contents: Default::default(),
+            tiles: Default::default(),
+        };
+        assert!(loader.sprite(&manifest(true)).unwrap_err().to_string().contains("256 MiB"));
+        assert_eq!(fetch.0, 0, "refuse the manifest before any tile is decompressed");
+        let shared = manifest(false);
+        check_tile_budget(&shared).unwrap();
+        let mut exact = manifest(true);
+        exact.frames[0].cels[0].pixels.tiles.pop();
+        check_tile_budget(&exact).unwrap();
+        let mut combined = exact.clone();
+        combined.frames[0].cels[0].indices = Some(SurfaceM {
+            format: PixelFormat::new(photocraft_color::ColorMode::Grayscale, photocraft_color::SampleType::U8, false),
+            default: "00".into(),
+            tiles: vec![TileRef { tx: 0, ty: 0, hash: format!("{:064x}", 1025) }],
+        });
+        assert!(check_tile_budget(&combined).unwrap_err().to_string().contains("256 MiB"), "index planes share the same budget");
+        let mut repeated = exact.clone();
+        repeated.frames.push(exact.frames[0].clone());
+        check_tile_budget(&repeated).unwrap();
     }
 }

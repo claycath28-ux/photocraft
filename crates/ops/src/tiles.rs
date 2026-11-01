@@ -80,6 +80,11 @@ pub(crate) fn blocks(doc: &Document, mut visit: impl FnMut(usize, usize)) {
                 visit(Arc::as_ptr(&chunk.bytes) as usize, chunk.bytes.len());
             }
         }
+        let tag_bytes =
+            sprite.tags.iter().fold(0usize, |n, tag| n.saturating_add(std::mem::size_of::<photocraft_doc::sprite::SpriteTag>()).saturating_add(tag.name.len()));
+        if tag_bytes != 0 {
+            visit(sprite.tags.as_ptr() as usize, tag_bytes);
+        }
     }
     for (_, _, layer) in doc.walk() {
         if let LayerContent::Smart(smart) = &layer.content

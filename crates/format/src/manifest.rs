@@ -14,8 +14,9 @@ use photocraft_doc::{
 use photocraft_geom::{Affine, Size};
 use serde::{Deserialize, Serialize};
 
-/// Current manifest version written by this build.
-pub const FORMAT_VERSION: u32 = 1;
+/// Highest manifest version this build reads. Sprite bundles require version 2 so older
+/// readers refuse them instead of silently discarding animation on the next save.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Hex-encoded BLAKE3 hash (64 chars).
 pub type Hash = String;

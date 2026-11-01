@@ -26,7 +26,10 @@ fn native_sprite_preserves_exact_indices_delays_metadata_and_remaps_all_layer_re
         duration_ms: 17,
         palette: palette.clone(),
         cels: [(id, cel.clone())].into(),
-        metadata: vec![SpriteChunk { kind: 0x2020, target: MetadataTarget::Cel(id), bytes: Arc::new(vec![1, 0, 0, 0, 2, 0, b'O', b'K']) }],
+        metadata: vec![
+            SpriteChunk { kind: 0x2020, target: MetadataTarget::Cel(id), bytes: Arc::new(vec![1, 0, 0, 0, 2, 0, b'O', b'K']) },
+            SpriteChunk { kind: 0x2004, target: MetadataTarget::Layer(id), bytes: Arc::new(vec![1, 2, 3, 4]) },
+        ],
     });
     let second = Arc::new(SpriteFrame {
         duration_ms: 83,
@@ -53,6 +56,8 @@ fn native_sprite_preserves_exact_indices_delays_metadata_and_remaps_all_layer_re
     let sprite = back.sprite.as_ref().unwrap();
     assert_eq!(sprite.layers[0].id, loaded_id);
     assert_eq!(sprite.frames[0].metadata[0].target, MetadataTarget::Cel(loaded_id));
+    assert_eq!(sprite.frames[0].metadata[1].target, MetadataTarget::Layer(loaded_id));
+    assert_eq!(sprite.tilemap_descriptor(loaded_id), Some([1, 2, 3, 4].as_slice()));
     assert_eq!(sprite.frames[1].cels[&loaded_id].linked_frame, Some(0));
     assert_eq!(sprite.frames[0].cels[&loaded_id].indices.as_ref().unwrap().to_interleaved(rect), [1, 2]);
     assert_eq!(sprite.frames.iter().map(|f| f.duration_ms).collect::<Vec<_>>(), [17, 83]);
@@ -64,4 +69,53 @@ fn native_sprite_preserves_exact_indices_delays_metadata_and_remaps_all_layer_re
     assert_eq!(sprite.frames[0].cels[&loaded_id].z_index, -2);
     assert_eq!(sprite.frames[0].cels[&loaded_id].opacity, 127);
     assert_eq!(sprite.layers[0].uuid, Some([7; 16]));
+}
+
+#[test]
+fn native_save_captures_displayed_cel_edits_and_versions_only_sprite_bundles() {
+    use photocraft_doc::{LayerContent, sprite::*};
+    let mut doc = Document::new("Painted animation", Size::new(2, 1), ColorMode::Rgb, SampleType::U8);
+    let mut layer = Layer::raster("Ink", PixelFormat::RGBA8);
+    layer.surface_mut().unwrap().write_pixel(0, 0, &[1.0, 0.0, 0.0, 1.0]);
+    let id = layer.id;
+    let pixels = layer.surface().unwrap().clone();
+    doc.layers.push(layer);
+    doc.sprite = Some(Sprite {
+        current: 0,
+        indexed: false,
+        transparent_index: 0,
+        pixel_aspect: [1, 1],
+        grid: [0; 4],
+        tags: vec![],
+        profile: None,
+        layers: vec![SpriteLayer { id, flags: 3, opacity: 255, uuid: None }],
+        frames: vec![Arc::new(SpriteFrame {
+            duration_ms: 100,
+            palette: Arc::new(vec![]),
+            metadata: vec![],
+            cels: [(
+                id,
+                Arc::new(SpriteCel { rect: Rect::from_xywh(0, 0, 1, 1), pixels, indices: None, opacity: 255, z_index: 0, linked_frame: None, precise: None }),
+            )]
+            .into(),
+        })],
+    });
+    doc.restore_sprite_frame().unwrap();
+    if let LayerContent::Raster(surface) = &mut doc.layers[0].content {
+        surface.write_pixel(0, 0, &[0.0, 1.0, 0.0, 1.0]);
+    }
+    let original = doc.clone();
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    assert_eq!(doc, original, "saving captures into a copy");
+    let read_version = |bytes: &[u8]| {
+        let zip = photocraft_format::zip::ZipReader::new(bytes).unwrap();
+        let raw = zip.read_by_name("manifest.json", usize::MAX).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["format_version"].as_u64().unwrap()
+    };
+    assert_eq!(read_version(&bytes), 2);
+    let back = photocraft_format::load_from_bytes(&bytes).unwrap();
+    let sprite = back.sprite.as_ref().unwrap();
+    assert_eq!(sprite.frames[0].cels[&back.layers[0].id].pixels.pixel(0, 0), [0.0, 1.0, 0.0, 1.0]);
+    doc.sprite = None;
+    assert_eq!(read_version(&photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap()), 1);
 }

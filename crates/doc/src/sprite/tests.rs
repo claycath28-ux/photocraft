@@ -139,3 +139,47 @@ fn removing_palette_transparency_is_refused_instead_of_silently_restoring_it() {
     assert!(doc.capture_sprite_frame().unwrap_err().contains("transparent palette index"));
     assert_eq!(doc.sprite, before);
 }
+
+#[test]
+fn indexed_validation_checks_used_samples_and_sparse_defaults_against_each_frame_palette() {
+    let mut doc = indexed();
+    let sprite = doc.sprite.as_mut().unwrap();
+    let id = sprite.layers[0].id;
+    let cel = Arc::make_mut(Arc::make_mut(&mut sprite.frames[0]).cels.get_mut(&id).unwrap());
+    cel.indices.as_mut().unwrap().write_interleaved(Rect::from_xywh(0, 0, 1, 1), &[255]);
+    assert!(sprite.validate().unwrap_err().contains("missing palette entry"));
+
+    let mut doc = indexed();
+    let sprite = doc.sprite.as_mut().unwrap();
+    let id = sprite.layers[0].id;
+    let cel = Arc::make_mut(Arc::make_mut(&mut sprite.frames[0]).cels.get_mut(&id).unwrap());
+    cel.indices = Some(Surface::with_default(PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false), &[1.0]));
+    assert!(sprite.validate().unwrap_err().contains("default pixel"));
+
+    let mut doc = indexed();
+    let sprite = doc.sprite.as_mut().unwrap();
+    let id = sprite.layers[0].id;
+    let cel = Arc::make_mut(Arc::make_mut(&mut sprite.frames[0]).cels.get_mut(&id).unwrap());
+    cel.indices.as_mut().unwrap().write_interleaved(Rect::from_xywh(50, 50, 1, 1), &[255]);
+    sprite.validate().unwrap();
+    Arc::make_mut(&mut Arc::make_mut(&mut sprite.frames[1]).palette).truncate(2);
+    assert!(sprite.validate().unwrap_err().contains("missing palette entry"), "shared samples are checked against every palette size");
+}
+
+#[test]
+fn sprite_equality_preserves_value_semantics_with_shared_and_distinct_frames() {
+    let doc = indexed();
+    let original = doc.sprite.unwrap();
+    let mut copy = original.clone();
+    assert_eq!(original, copy);
+    copy.frames[0] = Arc::new(copy.frames[0].as_ref().clone());
+    assert_eq!(original, copy);
+    Arc::make_mut(&mut copy.frames[0]).duration_ms += 1;
+    assert_ne!(original, copy);
+    let mut copy = original.clone();
+    copy.grid[0] = 1;
+    assert_ne!(original, copy);
+    let mut copy = original.clone();
+    copy.current = 1;
+    assert_ne!(original, copy);
+}
