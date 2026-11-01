@@ -523,6 +523,28 @@ fn typed_properties_and_slice_keys_are_retained_and_malformed_metadata_is_reject
 }
 
 #[test]
+fn export_refuses_16_bit_and_float_samples_without_modifying_the_document() {
+    for mode in [ColorMode::Rgb, ColorMode::Grayscale] {
+        for depth in [photocraft_color::SampleType::U8, photocraft_color::SampleType::U16, photocraft_color::SampleType::F32] {
+            let mut doc = photocraft_doc::Document::new("Depth", photocraft_geom::Size::new(2, 1), mode, depth);
+            let mut pixels = photocraft_raster::Surface::new(photocraft_color::PixelFormat::new(mode, depth, true));
+            pixels.write_pixel(0, 0, if mode == ColorMode::Rgb { &[0.25, 0.5, 0.75, 1.0] } else { &[0.5, 1.0] });
+            doc.layers.push(photocraft_doc::Layer::new("Ink", LayerContent::Raster(pixels)));
+            let before = doc.clone();
+            let result = super::export(&doc, &Interrupt::NONE);
+            if depth == photocraft_color::SampleType::U8 {
+                let back = read(&result.unwrap().bytes).unwrap().document;
+                assert_eq!(back.mode, mode);
+                assert_eq!(back.layers[0].surface(), doc.layers[0].surface());
+            } else {
+                assert!(result.unwrap_err().to_string().contains("8-bit"));
+            }
+            assert_eq!(doc, before);
+        }
+    }
+}
+
+#[test]
 fn every_documented_blend_identifier_survives_aseprite_and_native_roundtrips() {
     for mode in 0..19u16 {
         let doc = read(&sprite(32, 3, &[layer("Mode", 0, 0, 3, mode, 128), cel(0, [1, 1], [0, 0], 64, &[32, 64, 96, 255], true)])).unwrap().document;
