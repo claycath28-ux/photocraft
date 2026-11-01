@@ -68,6 +68,8 @@ fn delay_control(ui: &mut egui::Ui, document: u64, frame: usize, ms: u16) -> Opt
 
 /// Render the Timeline panel.
 pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    // A canvas tab can activate a document after the frame-start view sync.
+    app.sync_document_state();
     if !app.ui.timeline.open {
         return;
     }
@@ -75,7 +77,7 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let sprite = app.session.active().and_then(|d| d.doc.sprite.as_ref());
     let sprite_duration = sprite.map(|s| s.frame_duration_ms());
     let delay_target = app.session.active().and_then(|d| d.doc.sprite.as_ref().map(|s| (d.doc.id.0, s.current)));
-    let sprite_time = sprite.map(|s| s.frames.iter().take(s.current).map(|f| u64::from(f.duration_ms)).sum::<u64>() as f64 / 1000.0);
+    let sprite_time = sprite.map(|s| s.frames.iter().take(s.current).map(|f| u64::from(f.duration_ms.max(1))).sum::<u64>() as f64 / 1000.0);
     let sprite_tags = sprite.map(|s| s.tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
     let mut sprite_tag = app.ui.timeline.sprite_tag;
     if sprite_tag.is_some_and(|i| i >= sprite_tags.len()) {
@@ -479,5 +481,74 @@ mod review_tests {
         app.run("document.activate", json!({"document": 0})).unwrap();
         assert_eq!(app.ui.timeline.sprite_tag, None);
         assert!(!app.ui.timeline.playing);
+    }
+
+    #[test]
+    fn tag_reordering_or_removal_clears_selection_and_playback_but_duration_edits_do_not() {
+        let mut app = app();
+        app.session
+            .edit("Tags", |doc, _| {
+                let tags = &mut doc.sprite.as_mut().unwrap().tags;
+                let mut other = tags[0].clone();
+                other.name = "Other".into();
+                tags.push(other);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        app.ui.timeline.sprite_tag = Some(0);
+        app.ui.timeline.playing = true;
+        app.session
+            .edit("Reorder tags", |doc, _| {
+                doc.sprite.as_mut().unwrap().tags.swap(0, 1);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        assert_eq!(app.ui.timeline.sprite_tag, None);
+        assert!(!app.ui.timeline.playing);
+        app.ui.timeline.sprite_tag = Some(0);
+        app.ui.timeline.playing = true;
+        app.session
+            .edit("Remove tag", |doc, _| {
+                doc.sprite.as_mut().unwrap().tags.remove(0);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        assert_eq!(app.ui.timeline.sprite_tag, None, "an in-range index must not silently select the next tag");
+        assert!(!app.ui.timeline.playing);
+    }
+
+    #[test]
+    fn timeline_checks_a_raw_tab_activation_before_advancing_the_new_document() {
+        let mut app = app();
+        let second = photocraft_io::import("second.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+        app.session.add_document(second, None);
+        app.sync_views();
+        app.ui.timeline.sprite_tag = Some(0);
+        app.ui.timeline.playing = true;
+        app.ui.timeline.sprite_start = -10.0;
+        app.session.set_active(0); // canvas tab activation, after frame-start sync
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(|ui, app| windows(app, ui.ctx()), app);
+        h.run_steps(1);
+        assert_eq!(h.state().ui.timeline.sprite_tag, None);
+        assert!(!h.state().ui.timeline.playing);
+        assert_eq!(h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().current, 0);
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), 0);
+    }
+
+    #[test]
+    fn untagged_play_uses_the_playback_clock_for_preceding_zero_duration_frames() {
+        let mut app = app();
+        app.run("sprite.setDuration", json!({"frame":0,"durationMs":0})).unwrap();
+        app.run("timeline.setFrame", json!({"frame":1})).unwrap();
+        app.ui.timeline.sprite_tag = None;
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(0.0001).build_ui_state(|ui, app| windows(app, ui.ctx()), app);
+        h.run_steps(2);
+        h.get_by_label("Play").click();
+        h.run_steps(2);
+        assert!(h.state().ui.timeline.playing);
+        assert_eq!(h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().current, 1);
     }
 }

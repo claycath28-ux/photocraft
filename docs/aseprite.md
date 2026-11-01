@@ -90,7 +90,7 @@ reader. A PSD or flat export is a copy of the selected frame and warns that anim
 indices and Aseprite metadata require `.aseprite`/`.pcraft`; it does not become the sprite's
 writable source. Photoshop-specific content, masks, clipping/effects or blending that Aseprite
 cannot encode are refused with guidance to rasterize/convert a copy first.
-Extra alpha/spot channels and document text, XMP or EXIF metadata also require a native copy;
+Extra alpha/spot channels, named paths, notes, layer XMP and document text, XMP or EXIF metadata also require a native copy;
 Aseprite export refuses to discard them silently. ICC profiles are validated before export.
 
 ICC, sRGB, linear and other positive fixed-gamma profiles are retained. Untagged files stay
@@ -98,7 +98,7 @@ untagged. Palette names/alpha, tags/repeats, sprite/layer/cel/tag user data (inc
 properties), slices/pivots/nine-patch data, external references and legacy mask/path records are
 retained in bounded native blobs and re-emitted with their object associations. External files
 are never followed. Explicit layer/cel deletion removes metadata owned by the deleted object.
-Canvas size changes, flips and rotations are refused while retained slice coordinates are
+Canvas size changes, crops that move the canvas origin, flips and rotations are refused while retained slice coordinates are
 present, since PhotoCraft cannot yet transform those keys with the pixels.
 
 ## Limits and evidence
