@@ -44,6 +44,28 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, _params: &Value) -> Option<Result
     None
 }
 
+fn delay_control(ui: &mut egui::Ui, document: u64, frame: usize, ms: u16) -> Option<Value> {
+    ui.push_id(("sprite-frame-delay", document, frame), |ui| {
+        let mut delay = f32::from(ms);
+        let response = crate::widgets::value_field_prec(ui, &mut delay, 0.0..=65535.0, "ms", 72.0, 0).accessible_name(tl!("Frame Delay"));
+        let key = response.id.with("edit-gesture");
+        let stamp = ui.ctx().cumulative_pass_nr();
+        if response.drag_started() || response.gained_focus() {
+            ui.data_mut(|d| d.insert_temp(key, stamp));
+        }
+        let edit = response.changed().then(|| {
+            let gesture = ui.data_mut(|d| *d.get_temp_mut_or(key, stamp));
+            // A new drag/focus session gets its own key, scoped to this document/frame.
+            json!({"frame":frame,"durationMs":delay.round() as u16,"coalesce":format!("sprite-delay:{document}:{frame}:{gesture}")})
+        });
+        if response.drag_stopped() || response.lost_focus() {
+            ui.data_mut(|d| d.remove::<u64>(key));
+        }
+        edit
+    })
+    .inner
+}
+
 /// Render the Timeline panel.
 pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if !app.ui.timeline.open {
@@ -52,6 +74,7 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let tl = app.session.active().and_then(|d| d.doc.timeline.clone());
     let sprite = app.session.active().and_then(|d| d.doc.sprite.as_ref());
     let sprite_duration = sprite.map(|s| s.frame_duration_ms());
+    let delay_target = app.session.active().and_then(|d| d.doc.sprite.as_ref().map(|s| (d.doc.id.0, s.current)));
     let sprite_time = sprite.map(|s| s.frames.iter().take(s.current).map(|f| u64::from(f.duration_ms)).sum::<u64>() as f64 / 1000.0);
     let sprite_tags = sprite.map(|s| s.tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
     let mut sprite_tag = app.ui.timeline.sprite_tag;
@@ -127,10 +150,10 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
                             stop_play = true;
                             act = Some(("timeline.delete", json!({})));
                         }
-                        if let Some(ms) = sprite_duration {
-                            let mut delay = u32::from(ms);
-                            if ui.add(egui::DragValue::new(&mut delay).range(0..=65535).suffix(" ms")).changed() {
-                                act = Some(("sprite.setDuration", json!({"durationMs":delay})));
+                        if let (Some(ms), Some((document, frame))) = (sprite_duration, delay_target) {
+                            if let Some(params) = delay_control(ui, document, frame, ms) {
+                                stop_play = true;
+                                act = Some(("sprite.setDuration", params));
                             }
                         } else {
                             ui.label(RichText::new(format!("{:.0} fps", tl.fps)).color(t.text_dim));
@@ -143,14 +166,16 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     if selected.is_some_and(|i| i >= sprite_tags.len()) {
                         selected = None;
                     }
-                    craft_ui::ComboBox::from_id_salt("sprite-animation-tag")
+                    let _ = craft_ui::ComboBox::from_id_salt("sprite-animation-tag")
                         .selected_text(selected.and_then(|i| sprite_tags.get(i)).cloned().unwrap_or_else(|| tl!("All").to_owned()))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut selected, None, tl!("All"));
                             for (i, name) in sprite_tags.iter().enumerate() {
                                 ui.selectable_value(&mut selected, Some(i), name);
                             }
-                        });
+                        })
+                        .response
+                        .accessible_name(tl!("Animation"));
                     if selected != sprite_tag {
                         sprite_tag = selected;
                         stop_play = true;
@@ -237,6 +262,76 @@ pub fn windows(app: &mut PhotocraftApp, ctx: &egui::Context) {
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
+
+    fn sprite_timeline() -> Harness<'static, PhotocraftApp> {
+        let doc = photocraft_io::import("animation.aseprite", include_bytes!("../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.add_document(doc, None);
+        app.ui.timeline.open = true;
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(0.01).build_ui_state(|ui, app| windows(app, ui.ctx()), app);
+        h.run_steps(2);
+        h
+    }
+
+    fn delay(h: &Harness<'_, PhotocraftApp>) -> u16 {
+        h.state().session.active().unwrap().doc.sprite.as_ref().unwrap().frame_duration_ms()
+    }
+
+    #[test]
+    fn delay_drags_are_separate_single_undo_steps_with_redo() {
+        let mut h = sprite_timeline();
+        let original = delay(&h);
+        let mut values = Vec::new();
+        for gesture in 1..=2 {
+            let start = h.get_by_role(egui::accesskit::Role::SpinButton).rect().center();
+            h.hover_at(start);
+            h.run_steps(1);
+            h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+            h.run_steps(1);
+            let before = delay(&h);
+            for dx in [12.0, 24.0, 40.0] {
+                h.hover_at(start + egui::vec2(dx, 0.0));
+                h.run_steps(1);
+            }
+            h.event(egui::Event::PointerButton {
+                pos: start + egui::vec2(40.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run_steps(2);
+            assert_ne!(delay(&h), before, "drag changes the delay");
+            assert_eq!(h.state().session.active().unwrap().history.past_len(), gesture, "one step per drag");
+            values.push(delay(&h));
+        }
+        for (command, expected) in [("edit.undo", values[0]), ("edit.undo", original), ("edit.redo", values[0]), ("edit.redo", values[1])] {
+            h.state_mut().run(command, json!({})).unwrap();
+            h.run_steps(1);
+            assert_eq!(delay(&h), expected);
+        }
+    }
+
+    #[test]
+    fn delay_typing_coalesces_per_focus_session() {
+        let mut h = sprite_timeline();
+        for (steps, text, ms) in [(1, "123", 123), (2, "456", 456)] {
+            h.get_by_role(egui::accesskit::Role::SpinButton).click();
+            h.run_steps(1);
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.run_steps(1);
+            for ch in text.chars() {
+                h.event(egui::Event::Text(ch.to_string()));
+                h.run_steps(1);
+            }
+            h.key_press(egui::Key::Tab);
+            h.run_steps(2);
+            assert_eq!(delay(&h), ms);
+            assert_eq!(h.state().session.active().unwrap().history.past_len(), steps, "one step per typed value");
+        }
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        h.run_steps(1);
+        assert_eq!(delay(&h), 123);
+    }
 
     #[test]
     fn aseprite_timeline_uses_millisecond_delays_and_stops_at_a_finite_tag_end() {

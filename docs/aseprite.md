@@ -40,6 +40,7 @@ Window › Timeline selects and plays cel frames with their individual milliseco
 A tag selector follows forward, reverse, ping-pong and reverse ping-pong directions and finite
 repeat counts. Zero-duration frames play as fast as the UI allows (at least 1 ms for scheduling),
 while their stored zero duration is preserved. Navigation/playback do not add history steps.
+A delay drag or numeric typing session is one undo step; a new gesture creates a separate step.
 
 Painting and filters capture the selected frame's image; linked cels share that image, so an
 edit propagates across links while retaining each cel's position/opacity/z-order and frame palette.
@@ -63,8 +64,12 @@ Additional engine/CLI/control commands are:
 | `sprite.rasterizeTilemap` | `{layer}` explicitly replaces tile data with editable pixel cels |
 | `sprite.detach` | Explicitly keep only the selected frame as an ordinary document |
 
-Cel edits, frame changes and palette edits are undoable. Frame insertion/deletion is refused
-when retained slice keys would become stale; changing tag definitions is refused when existing
+Cel edits, frame changes and palette edits are undoable. Cel property edits and unlinking
+respect the layer's Lock All, including parent-group locks. Position locks also protect cel
+coordinates and z-order; they still allow opacity edits. Palette changes are frame-global
+color-table edits rather than painting on the active layer. Explicit tilemap rasterization
+unlocks its own display cache, but requires unlocked parent groups. Frame insertion/deletion is
+refused when retained slice keys would become stale; changing tag definitions is refused when existing
 tag user properties would be reassigned. Canvas changes with retained slice coordinates are
 also refused. These errors preserve the original document and explain the affected metadata.
 
