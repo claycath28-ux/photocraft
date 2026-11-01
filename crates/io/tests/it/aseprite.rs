@@ -68,6 +68,15 @@ fn aseprite_tilemaps_keep_ids_tilesets_properties_and_all_transform_pixels_throu
     let output = photocraft_io::export(&restored, "aseprite", &Default::default()).unwrap();
     let back = photocraft_io::import("back.aseprite", &output.bytes).unwrap().document;
     assert_eq!(back.layers[0].surface().unwrap(), doc.layers[0].surface().unwrap());
+    for candidate in [&doc, &restored, &back] {
+        assert!(
+            candidate.sprite.as_ref().unwrap().frames[0]
+                .metadata
+                .iter()
+                .any(|m| { m.kind == 0x2020 && m.bytes.windows(b"Tileset note".len()).any(|b| b == b"Tileset note") }),
+            "tileset user data survives each save boundary"
+        );
+    }
     let sprite = back.sprite.as_ref().unwrap();
     assert!(sprite.tilemap_descriptor(back.layers[0].id).is_some());
     assert!(sprite.frames[0].metadata.iter().any(|m| m.kind == 0x2023));

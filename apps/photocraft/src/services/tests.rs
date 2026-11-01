@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 fn aseprite_is_available_in_all_formats_and_its_own_open_filter() {
     assert!(OPEN_EXTS.contains(&"aseprite") && OPEN_EXTS.contains(&"ase"));
     assert!(OPEN_FILTERS.iter().any(|(name, exts)| *name == "Aseprite" && exts.contains(&"aseprite")));
-    assert!(!SAVE_FILTERS.iter().any(|(_, exts)| exts.contains(&"aseprite")));
+    assert!(SAVE_FILTERS.iter().any(|(name, exts)| *name == "Aseprite" && exts.contains(&"aseprite")));
 }
 
 /// #6601: a chosen path whose name isn't valid Unicode is reported, never handed on lossily

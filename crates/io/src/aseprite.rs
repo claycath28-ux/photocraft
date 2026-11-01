@@ -58,6 +58,12 @@ pub fn losses(doc: &Document) -> Vec<String> {
     if doc.sprite.is_none() && doc.timeline.is_some() {
         out.push("a video timeline must be converted to cel animation before Aseprite export".into());
     }
+    if !doc.channels.is_empty() {
+        out.push("Aseprite cannot retain extra alpha or spot channels; save a .pcraft copy instead".into());
+    }
+    if !doc.metadata.text.is_empty() || doc.metadata.xmp.is_some() || doc.metadata.exif.is_some() {
+        out.push("Aseprite cannot retain document text, XMP or EXIF metadata; save a .pcraft copy instead".into());
+    }
     out
 }
 

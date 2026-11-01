@@ -3,6 +3,7 @@
 
 use super::{ColorMode, Decoder, IoError, PixelFormat, Reader, Rect, Result, SampleType, Surface, invalid};
 use photocraft_doc::sprite::{self, MetadataTarget, SpriteChunk};
+use photocraft_raster::Interrupt;
 use std::{io::Read, sync::Arc};
 
 pub(in crate::aseprite) struct Tileset {
@@ -14,20 +15,41 @@ pub(in crate::aseprite) struct Tileset {
     pub pixels: Option<Vec<u8>>,
 }
 
-pub(in crate::aseprite) fn inflate(data: &[u8], expected: usize) -> Result<Vec<u8>> {
+pub(in crate::aseprite) fn inflate(data: &[u8], expected: usize, ctl: &Interrupt<'_>) -> Result<Vec<u8>> {
     if expected > sprite::MAX_BYTES {
         return Err(invalid("tile data exceeds 256 MiB"));
     }
     let mut z = flate2::bufread::ZlibDecoder::new(data);
     let mut pixels = Vec::new();
-    (&mut z).take(expected as u64 + 1).read_to_end(&mut pixels).map_err(|e| invalid(format!("invalid tile data: {e}")))?;
+    let mut limited = (&mut z).take(expected as u64 + 1);
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        ctl.check().map_err(|_| IoError::Cancelled)?;
+        let n = limited.read(&mut buffer).map_err(|e| invalid(format!("invalid tile data: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        append_bounded(&mut pixels, buffer.get(..n).ok_or_else(|| invalid("invalid inflated tile block size"))?, expected)?;
+    }
     if pixels.len() != expected || z.total_in() != data.len() as u64 {
         return Err(invalid("tile data length/checksum/trailing bytes are invalid"));
     }
     Ok(pixels)
 }
 
-pub(in crate::aseprite) fn tileset(data: &[u8], bpp: usize) -> Result<Tileset> {
+fn append_bounded(pixels: &mut Vec<u8>, block: &[u8], expected: usize) -> Result<()> {
+    let size = pixels.len().checked_add(block.len()).filter(|n| *n <= expected).ok_or_else(|| invalid("inflated tile data exceeds its declared size"))?;
+    if size > pixels.capacity() {
+        // Don't double past the declared budget, including on the extra byte used to detect
+        // an oversized stream. Allocation failure is an import error, not an abort.
+        let capacity = pixels.capacity().saturating_mul(2).max(64 * 1024).max(size).min(expected);
+        pixels.try_reserve_exact(capacity.saturating_sub(pixels.len())).map_err(|e| invalid(format!("cannot allocate tile data: {e}")))?;
+    }
+    pixels.extend_from_slice(block);
+    Ok(())
+}
+
+pub(in crate::aseprite) fn tileset(data: &[u8], bpp: usize, ctl: &Interrupt<'_>) -> Result<Tileset> {
     let mut r = Reader::new(data);
     let id = r.u32()?;
     let flags = r.u32()?;
@@ -51,7 +73,7 @@ pub(in crate::aseprite) fn tileset(data: &[u8], bpp: usize) -> Result<Tileset> {
     }
     let pixels = if flags & 2 != 0 {
         let len = r.u32()? as usize;
-        Some(inflate(r.take(len)?, expected)?)
+        Some(inflate(r.take(len)?, expected, ctl)?)
     } else {
         None
     };
@@ -82,7 +104,7 @@ pub(in crate::aseprite) struct Map {
     pub masks: [u32; 4],
     pub tiles: Vec<u8>,
 }
-pub(in crate::aseprite) fn map(data: &[u8]) -> Result<Map> {
+pub(in crate::aseprite) fn map(data: &[u8], ctl: &Interrupt<'_>) -> Result<Map> {
     let mut r = Reader::new(data);
     r.take(7)?;
     if r.u16()? != 3 {
@@ -107,7 +129,7 @@ pub(in crate::aseprite) fn map(data: &[u8]) -> Result<Map> {
         used |= m;
     }
     let expected = usize::from(width).checked_mul(usize::from(height)).and_then(|n| n.checked_mul(4)).ok_or_else(|| invalid("tile map size overflow"))?;
-    let tiles = inflate(r.take(r.remaining())?, expected)?;
+    let tiles = inflate(r.take(r.remaining())?, expected, ctl)?;
     Ok(Map { width, height, masks, tiles })
 }
 
@@ -181,7 +203,8 @@ impl Decoder<'_> {
         for frame in &self.frames {
             for c in &frame.metadata {
                 if c.kind == 0x2023 {
-                    let set = tileset(&c.bytes, source_bpp)?;
+                    self.ctl.check().map_err(|_| IoError::Cancelled)?;
+                    let set = tileset(&c.bytes, source_bpp, self.ctl)?;
                     decoded = decoded.checked_add(set.pixels.as_ref().map_or(0, Vec::len)).ok_or_else(|| invalid("tileset size overflow"))?;
                     if decoded > self.budget {
                         return Err(invalid("tilesets exceed the remaining decoded memory budget"));
@@ -201,7 +224,7 @@ impl Decoder<'_> {
                 let MetadataTarget::Cel(id) = record.target else { return Err(invalid("tile cel attachment is invalid")) };
                 let descriptor = descriptors.iter().find(|c| c.target == MetadataTarget::Layer(id)).ok_or_else(|| invalid("tile cel has no tilemap layer"))?;
                 let set = sets.get(&layer_tileset(&descriptor.bytes)?).ok_or_else(|| invalid("tilemap layer refers to a missing tileset"))?;
-                let parsed = map(&record.bytes)?;
+                let parsed = map(&record.bytes, self.ctl)?;
                 let frame = self.frames.get(frame_index).ok_or_else(|| invalid("tilemap frame is missing"))?;
                 let cel = frame.cels.get(&id).ok_or_else(|| invalid("tilemap cel is missing"))?.clone();
                 let palette = frame.palette.clone();
@@ -223,5 +246,45 @@ impl Decoder<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::{
+        io::Write,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn oversized_output_is_refused_before_growing_or_changing_the_buffer() {
+        let mut pixels = vec![7; 4];
+        let capacity = pixels.capacity();
+        assert!(append_bounded(&mut pixels, &[8], 4).is_err());
+        assert_eq!(pixels, [7; 4]);
+        assert_eq!(pixels.capacity(), capacity);
+        append_bounded(&mut pixels, &[8], 5).unwrap();
+        assert_eq!(pixels, [7, 7, 7, 7, 8]);
+        assert_eq!(pixels.capacity(), 5, "successful growth is capped at the declared length");
+    }
+
+    #[test]
+    fn inflation_checks_cancellation_between_blocks_without_weakening_zlib_validation() {
+        let raw = vec![7; 1024 * 1024];
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Default::default());
+        encoder.write_all(&raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let checks = AtomicUsize::new(0);
+        let cancel = || checks.fetch_add(1, Ordering::Relaxed) >= 2;
+        assert!(matches!(inflate(&compressed, raw.len(), &Interrupt::cancel_only(&cancel)), Err(IoError::Cancelled)));
+        assert_eq!(checks.load(Ordering::Relaxed), 3, "cancel during inflation rather than after the whole tileset");
+        assert_eq!(inflate(&compressed, raw.len(), &Interrupt::NONE).unwrap(), raw);
+        assert!(inflate(&compressed, raw.len() - 1, &Interrupt::NONE).is_err());
+        assert!(inflate(&compressed, raw.len() + 1, &Interrupt::NONE).is_err());
+        assert!(inflate(&compressed[..compressed.len() - 1], raw.len(), &Interrupt::NONE).is_err());
+        let mut trailing = compressed;
+        trailing.push(0);
+        assert!(inflate(&trailing, raw.len(), &Interrupt::NONE).is_err());
     }
 }

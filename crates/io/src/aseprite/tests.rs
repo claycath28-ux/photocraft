@@ -1,7 +1,9 @@
 use super::*;
-use photocraft_color::ColorMode;
+use photocraft_color::{ColorMode, PixelFormat, SampleType};
 use photocraft_doc::LayerContent;
 use photocraft_geom::Rect;
+use photocraft_raster::Surface;
+use std::sync::Arc;
 
 fn chunk(kind: u16, data: &[u8]) -> Vec<u8> {
     let mut out = ((data.len() + 6) as u32).to_le_bytes().to_vec();
@@ -585,4 +587,113 @@ proptest::proptest! {
         for (i,v) in edits { b[i]=v }
         let _=read(&b);
     }
+}
+
+#[test]
+fn export_refuses_extra_channels_and_unrepresentable_document_metadata() {
+    let original = read(include_bytes!("../../tests/fixtures/aseprite/layers.aseprite")).unwrap().document;
+    let changes: [fn(&mut photocraft_doc::Document); 4] = [
+        |d| d.channels.push(photocraft_doc::AlphaChannel::new("Alpha", Surface::new(PixelFormat::new(ColorMode::Grayscale, SampleType::U8, false)))),
+        |d| d.metadata.text.push(("Comment".into(), "Keep me".into())),
+        |d| d.metadata.xmp = Some(Arc::from("<x:xmpmeta/>")),
+        |d| d.metadata.exif = Some(Arc::new(vec![1, 2, 3])),
+    ];
+    for change in changes {
+        let mut doc = original.clone();
+        change(&mut doc);
+        let before = doc.clone();
+        assert!(!super::losses(&doc).is_empty());
+        assert!(crate::export(&doc, "aseprite", &Default::default()).is_err());
+        assert_eq!(doc, before);
+        let native = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+        assert_eq!(photocraft_format::load_from_bytes(&native).unwrap().metadata, doc.metadata);
+    }
+}
+
+#[test]
+fn export_refuses_a_group_owning_a_retained_cel() {
+    let mut doc = read(include_bytes!("../../tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+    let id = doc.layers[0].id;
+    let mut group = photocraft_doc::Layer::group("Group", vec![]);
+    group.id = id;
+    doc.layers[0] = group;
+    assert!(crate::export(&doc, "aseprite", &Default::default()).unwrap_err().to_string().contains("group layer cannot own"));
+}
+
+#[test]
+fn exported_icc_profiles_are_validated_before_a_file_is_written() {
+    let original = read(include_bytes!("../../tests/fixtures/aseprite/layers.aseprite")).unwrap().document;
+    for icc in [Arc::new(b"bad ICC".to_vec()), photocraft_cms::Builtin::SGray.profile().to_bytes()] {
+        let mut doc = original.clone();
+        doc.sprite.as_mut().unwrap().profile = None;
+        doc.icc_profile = Some(icc);
+        let before = doc.clone();
+        assert!(crate::export(&doc, "aseprite", &Default::default()).is_err());
+        assert_eq!(doc, before);
+    }
+    let mut doc = original;
+    doc.sprite.as_mut().unwrap().profile = None;
+    doc.icc_profile = Some(photocraft_cms::Builtin::Srgb.profile().to_bytes());
+    let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+    assert_eq!(read(&out.bytes).unwrap().document.icc_profile, doc.icc_profile);
+}
+
+fn opaque_indexed_document() -> photocraft_doc::Document {
+    let mut doc = photocraft_doc::Document::new("Indexed", photocraft_geom::Size::new(3, 1), ColorMode::Indexed, SampleType::U8);
+    doc.color_table = Some(photocraft_doc::ColorTable { colors: vec![[255, 0, 0], [0, 0, 255]], transparent: None });
+    let mut layer = photocraft_doc::Layer::raster("Ink", PixelFormat::RGBA8);
+    layer.surface_mut().unwrap().write_interleaved(Rect::from_xywh(0, 0, 3, 1), &[255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255]);
+    doc.layers.push(layer);
+    doc
+}
+
+#[test]
+fn opaque_indexed_export_reserves_transparency_and_keeps_only_the_real_background_locked() {
+    for background in [false, true] {
+        let mut doc = opaque_indexed_document();
+        doc.layers[0].locks.position = background;
+        doc.layers[0].locks.transparency = background;
+        let mut upper = doc.layers[0].clone();
+        upper.id = photocraft_doc::LayerId::fresh();
+        upper.locks = Default::default();
+        doc.layers.push(upper);
+        let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+        if let Ok(dir) = std::env::var("PCRAFT_ASEPRITE_OPAQUE_OUTPUT_DIR") {
+            std::fs::write(std::path::Path::new(&dir).join(format!("opaque-background-{background}.aseprite")), &out.bytes).unwrap();
+        }
+        let back = read(&out.bytes).unwrap().document;
+        for (source, loaded) in doc.layers.iter().zip(&back.layers) {
+            assert_eq!(source.surface().unwrap().to_interleaved(doc.bounds()), loaded.surface().unwrap().to_interleaved(back.bounds()));
+        }
+        assert_eq!(back.layers[0].locks.position, background);
+        assert_eq!(back.layers[0].locks.transparency, background);
+        assert!(!back.layers[1].locks.position);
+        assert!(!back.layers[1].locks.transparency);
+    }
+}
+
+#[test]
+fn indexed_export_without_a_transparent_entry_refuses_erased_or_partial_pixels() {
+    for alpha in [0.0, 0.5] {
+        let mut doc = opaque_indexed_document();
+        doc.layers[0].surface_mut().unwrap().write_pixel(1, 0, &[0.0, 0.0, 1.0, alpha]);
+        let before = doc.clone();
+        assert!(crate::export(&doc, "aseprite", &Default::default()).unwrap_err().to_string().contains("no transparent entry"));
+        assert_eq!(doc, before);
+    }
+}
+
+#[test]
+fn a_full_opaque_palette_needs_a_spare_index_only_on_ordinary_layers() {
+    let mut doc = opaque_indexed_document();
+    doc.size = photocraft_geom::Size::new(256, 1);
+    doc.color_table.as_mut().unwrap().colors = (0..=255).map(|v| [v, v, v]).collect();
+    let pixels: Vec<u8> = (0..=255).flat_map(|v| [v, v, v, 255]).collect();
+    doc.layers[0].surface_mut().unwrap().write_interleaved(Rect::from_xywh(0, 0, 256, 1), &pixels);
+    assert!(crate::export(&doc, "aseprite", &Default::default()).unwrap_err().to_string().contains("unused transparent palette index"));
+    doc.layers[0].locks.position = true;
+    doc.layers[0].locks.transparency = true;
+    let out = crate::export(&doc, "aseprite", &Default::default()).unwrap();
+    let back = read(&out.bytes).unwrap().document;
+    assert_eq!(back.layers[0].surface().unwrap().to_interleaved(back.bounds()), pixels);
 }

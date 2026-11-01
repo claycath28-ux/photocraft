@@ -285,3 +285,37 @@ fn tilemap_pixels_require_explicit_rasterization_while_other_edits_preserve_tile
     let out = photocraft_io::export(&s.active().unwrap().doc, "aseprite", &Default::default()).unwrap();
     assert!(photocraft_io::import("pixels.aseprite", &out.bytes).unwrap().document.sprite.as_ref().unwrap().tilemap_descriptor(id).is_none());
 }
+
+#[test]
+fn shrinking_an_indexed_palette_cannot_leave_locked_reference_cels_out_of_range() {
+    let mut doc = photocraft_io::import("animation.aseprite", include_bytes!("../../../../io/tests/fixtures/aseprite/animation.aseprite")).unwrap().document;
+    doc.sprite.as_mut().unwrap().layers[0].flags |= 64;
+    doc.layers[0].locks.all = true;
+    let mut s = add_to_session(doc);
+    assert_refused_unchanged(&mut s, "image.mode.colorTable", json!({"colors": ["#000000", "#ff0000"], "transparent": 0}));
+    let out = photocraft_io::export(&s.active().unwrap().doc, "aseprite", &Default::default()).unwrap();
+    photocraft_io::import("reference.aseprite", &out.bytes).unwrap();
+}
+
+#[test]
+fn turns_refuse_retained_slice_coordinates_before_pixels_or_history_change() {
+    use photocraft_doc::sprite::{MetadataTarget, SpriteChunk};
+    let mut s = session();
+    s.edit("Slice", |doc, _| {
+        Arc::make_mut(&mut doc.sprite.as_mut().unwrap().frames[0]).metadata.push(SpriteChunk {
+            kind: 0x2022,
+            target: MetadataTarget::Frame,
+            bytes: Arc::new(vec![]),
+        });
+        Ok(())
+    })
+    .unwrap();
+    for command in ["image.imageRotation.flipCanvasHorizontal", "image.imageRotation.flipCanvasVertical", "image.imageRotation.180", "image.imageRotation.90cw"]
+    {
+        assert_refused_unchanged(&mut s, command, json!({}));
+    }
+    let mut ordinary = session();
+    ordinary.execute("image.imageRotation.flipCanvasHorizontal", json!({})).unwrap();
+    assert_eq!(ordinary.active().unwrap().history.past_len(), 1);
+    ordinary.execute("edit.undo", json!({})).unwrap();
+}

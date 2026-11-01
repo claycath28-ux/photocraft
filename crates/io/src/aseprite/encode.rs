@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, io::Write, sync::Arc};
 
 use photocraft_color::{BlendMode, ColorMode, SampleType};
 use photocraft_doc::{
-    Document, Layer, LayerContent,
+    Document, Layer, LayerContent, LayerId,
     sprite::{self, MetadataTarget, Sprite, SpriteCel, SpriteChunk, SpriteFrame, SpriteLayer},
 };
 use photocraft_geom::Rect;
@@ -97,6 +97,9 @@ pub(super) fn export(doc: &Document, ctl: &Interrupt<'_>) -> Result<ExportResult
             }
         }
         for (index, (layer, _)) in layers.iter().enumerate() {
+            if layer.is_group() && frame.cels.contains_key(&layer.id) {
+                return Err(invalid("a group layer cannot own a sprite cel"));
+            }
             let Some(cel) = frame.cels.get(&layer.id) else { continue };
             let tilemap = frame.metadata.iter().find(|m| m.kind == 0x2005 && m.target == MetadataTarget::Cel(layer.id)).map(|m| m.bytes.as_slice());
             chunks.push(cel_chunk(index, cel, sprite.indexed, tilemap, ctl)?);
@@ -136,7 +139,7 @@ pub(super) fn export(doc: &Document, ctl: &Interrupt<'_>) -> Result<ExportResult
 
 fn from_document(doc: &Document) -> Result<Sprite> {
     let indexed = doc.mode == ColorMode::Indexed;
-    let palette = Arc::new(if indexed {
+    let mut palette = Arc::new(if indexed {
         let table = doc.color_table.as_ref().ok_or_else(|| invalid("indexed document has no color table"))?;
         if table.colors.is_empty() || table.colors.len() > 256 {
             return Err(invalid("indexed color table must have 1..256 entries"));
@@ -145,11 +148,11 @@ fn from_document(doc: &Document) -> Result<Sprite> {
     } else {
         Vec::new()
     });
-    let transparent = doc.color_table.as_ref().and_then(|t| t.transparent).unwrap_or(0);
+    let mut transparent = doc.color_table.as_ref().and_then(|t| t.transparent).unwrap_or(0);
     let mut cels = BTreeMap::new();
     let mut layers = Vec::new();
     for (_, _, l) in doc.walk() {
-        let background = indexed && doc.color_table.as_ref().is_some_and(|t| t.transparent.is_none());
+        let background = indexed && doc.color_table.as_ref().is_some_and(|t| t.transparent.is_none()) && doc.background().is_some_and(|bg| bg.id == l.id);
         layers.push(SpriteLayer { id: l.id, flags: if background { 11 } else { 3 }, opacity: (l.opacity.clamp(0.0, 1.0) * 255.0).round() as u8, uuid: None });
         match &l.content {
             LayerContent::Group(_) => {}
@@ -166,6 +169,9 @@ fn from_document(doc: &Document) -> Result<Sprite> {
                         precise: None,
                     };
                     if indexed {
+                        if doc.color_table.as_ref().is_some_and(|t| t.transparent.is_none()) {
+                            require_opaque(pixels, rect)?;
+                        }
                         sprite::pixels::capture_indices(&mut cel, pixels, &palette, doc.color_table.as_ref().and_then(|t| t.transparent)).map_err(invalid)?;
                     }
                     cels.insert(l.id, Arc::new(cel));
@@ -173,6 +179,9 @@ fn from_document(doc: &Document) -> Result<Sprite> {
             }
             _ => return Err(invalid("Aseprite stores raster layers and groups; rasterize text, vector and adjustment layers in a copy first")),
         }
+    }
+    if indexed && doc.color_table.as_ref().is_some_and(|t| t.transparent.is_none()) {
+        transparent = reserve_transparent_index(Arc::make_mut(&mut palette), &layers, &cels)?;
     }
     Ok(Sprite {
         frames: vec![Arc::new(SpriteFrame { duration_ms: 100, palette, cels, metadata: Vec::new() })],
@@ -185,6 +194,50 @@ fn from_document(doc: &Document) -> Result<Sprite> {
         tags: Vec::new(),
         profile: None,
     })
+}
+
+/// Without a transparent entry, quantizing alpha would silently turn erased pixels opaque.
+fn require_opaque(pixels: &photocraft_raster::Surface, rect: Rect) -> Result<()> {
+    sprite::pixels::checked_rect(rect, 5).map_err(invalid)?;
+    if pixels.format().alpha {
+        for y in rect.y0..rect.y1 {
+            let row = pixels.to_interleaved(Rect::from_xywh(rect.x0, y, rect.width(), 1));
+            if row.chunks_exact(pixels.format().bytes_per_pixel()).any(|p| p.last().copied() != Some(255)) {
+                return Err(invalid(
+                    "indexed pixels have transparency but the color table has no transparent entry; add palette transparency before exporting",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reserve_transparent_index(palette: &mut Vec<sprite::PaletteEntry>, layers: &[SpriteLayer], cels: &BTreeMap<LayerId, Arc<SpriteCel>>) -> Result<u8> {
+    // Aseprite reserves the header index on every non-Background layer, even if the
+    // source has no transparency. Reserve an unused entry so opaque index zero stays ink.
+    let mut used = [false; 256];
+    for layer in layers.iter().filter(|l| l.flags & 8 == 0) {
+        if let Some(cel) = cels.get(&layer.id)
+            && let Some(indices) = &cel.indices
+        {
+            for y in cel.rect.y0..cel.rect.y1 {
+                for index in indices.to_interleaved(Rect::from_xywh(cel.rect.x0, y, cel.rect.width(), 1)) {
+                    if let Some(value) = used.get_mut(usize::from(index)) {
+                        *value = true;
+                    }
+                }
+            }
+        }
+    }
+    match used.iter().take(palette.len()).position(|v| !v) {
+        Some(index) => Ok(index as u8),
+        None if palette.len() < 256 => {
+            let index = palette.len() as u8;
+            palette.push(sprite::PaletteEntry { rgba: [0; 4], name: String::new() });
+            Ok(index)
+        }
+        None => Err(invalid("Aseprite needs an unused transparent palette index on non-Background layers; reduce the palette or save a .pcraft copy")),
+    }
 }
 
 fn layers<'a>(doc: &'a Document, sprite: &Sprite) -> Result<Vec<(&'a Layer, usize)>> {
@@ -265,7 +318,7 @@ fn cel_chunk(index: usize, cel: &SpriteCel, indexed: bool, tilemap: Option<&[u8]
     if let Some(link) = cel.linked_frame {
         data.extend(u16::try_from(link).map_err(|_| invalid("linked frame index overflow"))?.to_le_bytes());
     } else if let Some(raw) = tilemap {
-        super::decode::tilemap::map(raw)?;
+        super::decode::tilemap::map(raw, ctl)?;
         data.extend(raw.get(16..).ok_or_else(|| invalid("truncated tilemap record"))?);
     } else {
         data.extend(u16::try_from(cel.rect.width()).map_err(|_| invalid("cel width overflow"))?.to_le_bytes());
@@ -327,6 +380,7 @@ fn profile(doc: &Document, sprite: &Sprite) -> Result<Option<Vec<u8>>> {
     data.extend([0; 14]);
     data.extend((icc.len() as u32).to_le_bytes());
     data.extend(icc.as_slice());
+    super::decode::metadata::color_profile(&mut Reader::new(&data), doc.mode == ColorMode::Grayscale)?;
     Ok(Some(data))
 }
 
@@ -374,7 +428,7 @@ fn validate_tilemaps(sprite: &Sprite, mode: ColorMode, ctl: &Interrupt<'_>) -> R
                 if i != 0 {
                     return Err(invalid("tilesets must be defined in the first frame"));
                 }
-                let set = tilemap::tileset(&c.bytes, fmt.bytes_per_pixel())?;
+                let set = tilemap::tileset(&c.bytes, fmt.bytes_per_pixel(), ctl)?;
                 bytes = bytes.checked_add(set.pixels.as_ref().map_or(0, Vec::len)).ok_or_else(|| invalid("tileset size overflow"))?;
                 if bytes > sprite::MAX_BYTES {
                     return Err(invalid("tilesets exceed 256 MiB"));
@@ -394,7 +448,7 @@ fn validate_tilemaps(sprite: &Sprite, mode: ColorMode, ctl: &Interrupt<'_>) -> R
                 let set = sets.get(&tilemap::layer_tileset(descriptor)?).ok_or_else(|| invalid("tilemap layer's tileset is missing"))?;
                 let cel = frame.cels.get(&id).ok_or_else(|| invalid("tilemap cel is missing"))?;
                 let (rect, pixels) =
-                    tilemap::render(&tilemap::map(&c.bytes)?, set, (cel.rect.x0, cel.rect.y0), fmt, sprite.indexed.then_some(sprite.transparent_index))?;
+                    tilemap::render(&tilemap::map(&c.bytes, ctl)?, set, (cel.rect.x0, cel.rect.y0), fmt, sprite.indexed.then_some(sprite.transparent_index))?;
                 let stored = if sprite.indexed { cel.indices.as_ref().ok_or_else(|| invalid("tilemap index image is missing"))? } else { &cel.pixels };
                 if rect != cel.rect || pixels != *stored {
                     return Err(invalid("tilemap display was edited without rasterization; original tile records were preserved"));
