@@ -78,6 +78,7 @@ pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> 
         let r = (|| -> Result<Vec<String>> {
             written.check(&target_text).map_err(CliError::OutputClaimed)?;
             let mut h = Headless::trusted_local();
+            a.import.apply(&mut h.session);
             // Steps that play another action find it in the set; the session's playback stack
             // stops an action that calls itself.
             h.session.actions.list = set.clone();
@@ -122,6 +123,7 @@ pub(crate) fn droplet(a: &DropletArgs, out: &mut dyn Write, err: &mut dyn Write)
         p["output"] = json!(o);
     }
     let mut s = photocraft_engine::Session::new();
+    a.import.apply(&mut s);
     let r = s.execute("file.automate.runDroplet", p)?;
     for f in r["files"].as_array().into_iter().flatten() {
         let _ = writeln!(out, "ok    {}", f.as_str().unwrap_or_default());

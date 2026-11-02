@@ -34,7 +34,9 @@ pub(crate) fn commands(a: &CommandsArgs, out: &mut dyn Write) -> Result {
 
 pub(crate) fn serve(a: &ServeArgs, err: &mut dyn Write) -> Result {
     use std::sync::{Arc, Mutex};
-    let h = Arc::new(Mutex::new(Headless::with_workspace(a.automation.workspace()?)));
+    let mut headless = Headless::with_workspace(a.automation.workspace()?);
+    a.import.apply(&mut headless.session);
+    let h = Arc::new(Mutex::new(headless));
     match a.port {
         Some(port) => {
             if a.port_from_env {
@@ -75,7 +77,11 @@ pub(crate) fn mcp(a: &McpArgs, err: &mut dyn Write) -> Result {
             let token = security::client_token(a.control.control_token.as_deref(), a.control.control_token_file.as_deref())?;
             PhotocraftMcp::bridge(&addr.to_string(), &token)?
         }
-        None => PhotocraftMcp::headless_with_workspace(a.automation.workspace()?),
+        None => {
+            let mut h = Headless::with_workspace(a.automation.workspace()?);
+            a.import.apply(&mut h.session);
+            PhotocraftMcp::with_backend(photocraft_automation::Backend::Headless(std::sync::Arc::new(std::sync::Mutex::new(h))))
+        }
     };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     Ok(rt.block_on(server.serve_stdio())?)

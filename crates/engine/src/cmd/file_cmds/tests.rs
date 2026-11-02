@@ -1989,3 +1989,19 @@ fn sanitize_keeps_windows_device_names_off_the_disk() {
         assert_eq!(sanitize(name), name);
     }
 }
+
+#[test]
+fn psd_import_budget_is_used_by_open_place_and_auxiliary_imports() {
+    let source = session(256, 256, 8);
+    let bytes = photocraft_io::export(doc(&source), "psd", &Default::default()).unwrap().bytes;
+    let mut s = session(16, 16, 8);
+    s.execute("prefs.set", json!({"path":"performance.psdImportMemoryMb","value":1})).unwrap();
+    assert!(open_bytes_as(&mut s, "layers.psd", &bytes, None, None).unwrap_err().to_string().contains("pixel memory"));
+    assert!(place_bytes(&mut s, "layers.psd", bytes.clone(), None, &json!({})).unwrap_err().to_string().contains("pixel memory"));
+    assert!(open::import_opened(&s, "layers.psd", &bytes).unwrap_err().to_string().contains("pixel memory"));
+    assert_eq!(s.documents().len(), 1);
+    assert_eq!(doc(&s).layers.len(), 1);
+    s.execute("prefs.set", json!({"path":"performance.psdImportMemoryMb","value":4096})).unwrap();
+    open_bytes_as(&mut s, "layers.psd", &bytes, None, None).unwrap();
+    assert_eq!(s.documents().len(), 2);
+}

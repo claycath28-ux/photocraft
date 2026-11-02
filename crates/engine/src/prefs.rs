@@ -578,6 +578,9 @@ pub struct Performance {
     /// Memory PhotoCraft may use, in MB: bounds each document's pixels plus its History (the
     /// oldest states are dropped beyond it), and the result of one transform.
     pub memory_usage_mb: u32,
+    /// PSD/PSB pixel preflight limit in MiB; 0 selects the machine-aware default.
+    /// Includes decode workspace. Web honours at most 1 GiB. Applies to subsequent imports.
+    pub psd_import_memory_mb: u32,
     /// Undo steps kept per document (History panel states).
     pub history_states: u32,
     /// Cache Levels, 1–8: the highest cache level the Histogram panel counts a large document at
@@ -645,6 +648,7 @@ impl Default for Performance {
     fn default() -> Self {
         Self {
             memory_usage_mb: DEFAULT_MEMORY_USAGE_MB,
+            psd_import_memory_mb: 0,
             history_states: 50,
             cache_levels: 4,
             cache_tile_size: 8192,

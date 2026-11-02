@@ -21,7 +21,7 @@ use photocraft_raster::{Surface, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
-use crate::file_cmds::{file_name, flattened, import, list_images, read_file};
+use crate::file_cmds::{file_name, flattened, import_with_options, list_images, read_file};
 use crate::{EngineError, Result, Session};
 
 /// Wall-clock timer for the `ms` fields of results (always 0 on the web, where
@@ -76,9 +76,10 @@ fn load_sources(s: &Session, p: &Value, cmd: &str) -> Result<Loaded> {
         Some(Value::String(dir)) => list_images(dir)?,
         _ => Vec::new(),
     };
+    let opts = crate::jobs::import_options(s.prefs());
     for path in &paths {
         let bytes = read_file(path)?;
-        docs.push((file_name(path), import(&file_name(path), &bytes)?));
+        docs.push((file_name(path), import_with_options(&file_name(path), &bytes, &opts)?));
     }
     if docs.is_empty() {
         return Err(bad(cmd, "pass \"paths\" (files or a folder) or \"useOpenDocuments\": true"));

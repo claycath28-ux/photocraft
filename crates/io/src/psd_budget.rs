@@ -12,9 +12,38 @@ use photocraft_psd::{
 
 use crate::IoError;
 
-/// Default allowance for PSD layer, mask and merged-image pixels, including conversion
-/// workspace and tile padding. Other format/parser limits still apply. Callers may lower it.
+/// Fallback allowance when physical memory cannot be detected; also the fixed wasm ceiling.
+/// Native imports use [`default_psd_import_pixel_bytes`] unless explicitly configured.
 pub const DEFAULT_PSD_IMPORT_PIXEL_BYTES: u64 = if cfg!(target_arch = "wasm32") { 1 << 30 } else { 2 << 30 };
+
+/// Default PSD/PSB pixel allowance, including retained tiles and conversion workspace.
+/// Native: half of physical RAM, with a 2 GiB floor/fallback and an address-space bound.
+/// Web: 1 GiB. This is a preflight allowance, not a guarantee of available memory.
+pub fn default_psd_import_pixel_bytes() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DEFAULT_PSD_IMPORT_PIXEL_BYTES
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *LIMIT.get_or_init(|| {
+            let mut system = sysinfo::System::new();
+            system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+            native_default(system.total_memory(), isize::MAX as u64)
+        })
+    }
+}
+
+#[cfg(any(test, not(target_arch = "wasm32")))]
+fn native_default(total_ram: u64, address_limit: u64) -> u64 {
+    (total_ram / 2).max(2 << 30).min(address_limit)
+}
+
+/// Explicit native limits can be raised or lowered; wasm retains its fixed safety ceiling.
+pub(crate) fn effective_limit(requested: u64, web: bool) -> u64 {
+    if web { requested.min(1 << 30) } else { requested.min(isize::MAX as u64) }
+}
 
 #[derive(Default)]
 struct ImportBudget {

@@ -1,4 +1,4 @@
-use super::open::import_at_raw_ppi;
+use super::open::import_opened;
 use super::paths::{extension, file_name, join, list_images, read_file, stem};
 use super::processing::parse_steps;
 use super::save::{SaveOpts, save_doc};
@@ -182,8 +182,7 @@ fn process_outputs<'a>(
     save: SaveOpts,
     f: &dyn Fn(&mut Session, &str) -> Result<bool>,
 ) -> Value {
-    // The scratch sessions have default preferences; a raw opens at the user's Raw Defaults.
-    let raw_ppi = s.prefs().raw_defaults.resolution;
+    // Imports use the caller's preferences, including Raw Defaults and the PSD pixel allowance.
     let mut files = Vec::new();
     let mut errors = Vec::new();
     let mut written = OutputClaims::default();
@@ -192,7 +191,7 @@ fn process_outputs<'a>(
             written.check(&out).map_err(EngineError::Other)?;
             let bytes = read_file(path)?;
             let mut scratch = Session::new();
-            let doc = import_at_raw_ppi(raw_ppi, &file_name(path), &bytes)?;
+            let doc = import_opened(s, &file_name(path), &bytes)?;
             scratch.add_document(doc, Some(path.to_string()));
             if !f(&mut scratch, &out)? {
                 let d = scratch.active().ok_or(EngineError::NoDocument)?;
