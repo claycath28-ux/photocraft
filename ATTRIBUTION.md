@@ -148,3 +148,9 @@ are adapted from Skyfuller1303’s MIT OR Apache-2.0 implementation in
 `897f20072762fdf0eb688adcdb8d8cda7b38ce66`. Don Omondi’s embedded AI/PDF/EPS
 extension and current-main integration build on that source. Clipboard and unrelated
 Shape Tools changes from that branch are not included.
+
+## Issue #10745 review evidence
+
+| Path | Title | Author | Source | License |
+|---|---|---|---|---|
+| `docs/review/10745/*.png` | PhotoCraft Performance preferences before/after screenshots | @Bobderto | PhotoCraft offscreen snapshot example, base and issue #10745 patch | MIT OR Apache-2.0; unmodified app brand mark remains under `docs/brand/LICENSE-brand.txt` |
